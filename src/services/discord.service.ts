@@ -16,7 +16,7 @@ class DiscordService {
       ],
     });
 
-    this.channelId = process.env.DISCORD_CHANNEL_ID || "";
+    this.channelId = process.env.DISCORD_NOTIFICATION_CHANNEL_ID || process.env.DISCORD_CHANNEL_ID || "";
 
     this.client.once("ready", () => {
       console.log(`✅ Discord bot logged in as ${this.client.user?.tag}`);
@@ -50,6 +50,7 @@ class DiscordService {
     tokenSymbol?: string;
     transactionHash?: string;
     blockchain?: string;
+    additionalInfo?: string;
   }): Promise<void> {
     if (!this.isReady || !this.channelId) {
       console.warn("⚠️  Discord bot not ready or channel ID not configured");
@@ -64,8 +65,16 @@ class DiscordService {
         return;
       }
 
+      // Determine embed color based on activity type
+      let embedColor = "#0099ff"; // Default blue
+      if (data.activityType.toUpperCase().includes("BUY")) {
+        embedColor = "#22c55e"; // Green for buys
+      } else if (data.activityType.toUpperCase().includes("SELL")) {
+        embedColor = "#ef4444"; // Red for sells
+      }
+
       const embed = new EmbedBuilder()
-        .setColor("#0099ff")
+        .setColor(embedColor)
         .setTitle("🐋 Whale Activity Detected")
         .addFields(
           { name: "Wallet Address", value: data.walletAddress, inline: false },
@@ -86,6 +95,14 @@ class DiscordService {
         embed.addFields({
           name: "Transaction",
           value: `\`${data.transactionHash}\``,
+          inline: false,
+        });
+      }
+
+      if (data.additionalInfo) {
+        embed.addFields({
+          name: "Details",
+          value: data.additionalInfo,
           inline: false,
         });
       }

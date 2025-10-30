@@ -1,5 +1,5 @@
 import "reflect-metadata";
-import express, { Request, Response } from "express";
+import express, { type Request, type Response } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
@@ -9,6 +9,7 @@ import { discordService } from "./services/discord.service.js";
 import { swaggerSpec } from "./config/swagger.js";
 import whalesRouter from "./routes/whales.routes.js";
 import activitiesRouter from "./routes/activities.routes.js";
+import { tradePollingService } from "./services/trade-polling.service.js";
 
 // Load environment variables
 dotenv.config();
@@ -70,6 +71,10 @@ const startServer = async () => {
     console.log("🔄 Connecting Discord bot...");
     await discordService.connect();
 
+    // Start trade polling service
+    console.log("🔄 Starting trade polling service...");
+    tradePollingService.start();
+
     // Start Express server
     app.listen(PORT, () => {
       console.log(`\n🚀 Server is running on port ${PORT}`);
@@ -87,6 +92,8 @@ const startServer = async () => {
 process.on("SIGTERM", async () => {
   console.log("\n👋 Shutting down gracefully...");
   
+  tradePollingService.stop();
+  
   if (AppDataSource.isInitialized) {
     await AppDataSource.destroy();
   }
@@ -99,6 +106,8 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   console.log("\n👋 Shutting down gracefully...");
+  
+  tradePollingService.stop();
   
   if (AppDataSource.isInitialized) {
     await AppDataSource.destroy();

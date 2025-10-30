@@ -2,6 +2,7 @@
   "name": "polysignal_v2",
   "version": "1.0.0",
   "description": "Whale activity tracking system",
+  "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -16,6 +17,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@types/axios": "^0.9.36",
+    "axios": "^1.13.1",
     "cors": "^2.8.5",
     "discord.js": "^14.24.1",
     "dotenv": "^17.2.3",

@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { AppDataSource } from "../config/database.js";
 import { WhaleActivity } from "../entities/WhaleActivity.js";
 import { TrackedWhale } from "../entities/TrackedWhale.js";
