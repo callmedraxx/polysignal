@@ -1,4 +1,18 @@
 import swaggerJsdoc from "swagger-jsdoc";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Determine the correct path based on environment
+// Since JSDoc comments are in source TypeScript files, we need source files
+// In production (running from dist/), we need to look up to src/
+// In development (running from src/), we look relative to src/
+const isProduction = process.env.NODE_ENV === "production";
+const routesPath = isProduction
+  ? path.join(process.cwd(), "src/routes/*.ts") // In production from dist/, go to project root then src/
+  : path.join(__dirname, "../routes/*.ts"); // In development, look relative to src
 
 const options: swaggerJsdoc.Options = {
   definition: {
@@ -13,8 +27,8 @@ const options: swaggerJsdoc.Options = {
     },
     servers: [
       {
-        url: "http://localhost:3000",
-        description: "Development server",
+        url: process.env.APP_URL || `http://localhost:${process.env.APP_PORT || 3000}`,
+        description: process.env.NODE_ENV === "production" ? "Production server" : "Development server",
       },
     ],
     components: {
@@ -131,7 +145,7 @@ const options: swaggerJsdoc.Options = {
       },
     },
   },
-  apis: ["./src/routes/*.ts"],
+  apis: [routesPath],
 };
 
 export const swaggerSpec = swaggerJsdoc(options);

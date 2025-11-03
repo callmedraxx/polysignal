@@ -6,7 +6,10 @@ import {
   UpdateDateColumn,
   OneToMany,
 } from "typeorm";
-import { WhaleActivity } from "./WhaleActivity.js";
+import { createRequire } from "module";
+import type { WhaleActivity } from "./WhaleActivity.js";
+
+const require = createRequire(import.meta.url);
 
 @Entity("tracked_whales")
 export class TrackedWhale {
@@ -22,6 +25,9 @@ export class TrackedWhale {
   @Column({ type: "text", nullable: true })
   description?: string;
 
+  @Column({ type: "varchar", length: 50, default: "regular" })
+  category!: string; // e.g., "regular", "whale", "mega_whale", etc.
+
   @Column({ type: "boolean", default: true })
   isActive!: boolean;
 
@@ -34,7 +40,7 @@ export class TrackedWhale {
   @UpdateDateColumn()
   updatedAt!: Date;
 
-  @OneToMany(() => WhaleActivity, (activity) => activity.whale)
+  @OneToMany("WhaleActivity", "whale")
   activities!: WhaleActivity[];
 }
 

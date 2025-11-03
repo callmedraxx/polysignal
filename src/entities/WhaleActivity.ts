@@ -7,7 +7,10 @@ import {
   ManyToOne,
   JoinColumn,
 } from "typeorm";
-import { TrackedWhale } from "./TrackedWhale.js";
+import { createRequire } from "module";
+import type { TrackedWhale } from "./TrackedWhale.js";
+
+const require = createRequire(import.meta.url);
 
 @Entity("whale_activity")
 export class WhaleActivity {
@@ -17,7 +20,7 @@ export class WhaleActivity {
   @Column({ type: "uuid" })
   whaleId!: string;
 
-  @ManyToOne(() => TrackedWhale, (whale) => whale.activities, {
+  @ManyToOne("TrackedWhale", "activities", {
     onDelete: "CASCADE",
   })
   @JoinColumn({ name: "whaleId" })
@@ -44,11 +47,26 @@ export class WhaleActivity {
   @Column({ type: "varchar", length: 100, nullable: true })
   blockchain?: string;
 
+  @Column({ type: "varchar", length: 255, nullable: true })
+  category?: string; // Market category from Polymarket
+
   @Column({ type: "jsonb", nullable: true })
   metadata?: Record<string, any>;
 
   @Column({ type: "timestamp", nullable: true })
   activityTimestamp?: Date;
+
+  @Column({ type: "varchar", length: 50, nullable: true })
+  status?: string; // "open" or "closed"
+
+  @Column({ type: "varchar", length: 255, nullable: true })
+  discordMessageId?: string; // Store Discord message ID for updates
+
+  @Column({ type: "decimal", precision: 36, scale: 18, nullable: true })
+  realizedPnl?: string; // PnL when position is closed
+
+  @Column({ type: "decimal", precision: 10, scale: 4, nullable: true })
+  percentPnl?: number; // Percentage PnL when position is closed
 
   @CreateDateColumn()
   createdAt!: Date;

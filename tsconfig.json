@@ -24,7 +24,7 @@
 
     // Stricter Typechecking Options
     "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
+    // "exactOptionalPropertyTypes": true, // Disabled due to TypeORM compatibility issues
 
     // Recommended Options
     "strict": true,

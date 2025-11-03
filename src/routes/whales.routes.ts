@@ -17,6 +17,11 @@ const whaleRepository = AppDataSource.getRepository(TrackedWhale);
  *         schema:
  *           type: boolean
  *         description: Filter by active status
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *         description: Filter by whale category/type
  *     responses:
  *       200:
  *         description: List of tracked whales
@@ -29,11 +34,19 @@ const whaleRepository = AppDataSource.getRepository(TrackedWhale);
  */
 router.get("/", async (req: Request, res: Response) => {
   try {
-    const { isActive } = req.query;
-    const where = isActive !== undefined ? { isActive: isActive === "true" } : {};
+    const { isActive, category } = req.query;
+    const where: any = {};
+    
+    if (isActive !== undefined) {
+      where.isActive = isActive === "true";
+    }
+    
+    if (category !== undefined) {
+      where.category = category;
+    }
     
     const whales = await whaleRepository.find({
-      where,
+      where: Object.keys(where).length > 0 ? where : undefined,
       order: { createdAt: "DESC" },
     });
     
@@ -108,6 +121,18 @@ router.get("/:id", async (req: Request, res: Response) => {
  *                 type: string
  *                 description: Label to identify the whale
  *                 example: "Vitalik"
+ *               category:
+ *                 type: string
+ *                 description: Category/type of whale (e.g., "regular", "whale", "mega_whale")
+ *                 default: "regular"
+ *                 example: "whale"
+ *               description:
+ *                 type: string
+ *                 description: Optional description of the whale
+ *               isActive:
+ *                 type: boolean
+ *                 description: Whether the whale is actively tracked
+ *                 default: true
  *     responses:
  *       201:
  *         description: Whale added successfully
@@ -122,7 +147,7 @@ router.get("/:id", async (req: Request, res: Response) => {
  */
 router.post("/", async (req: Request, res: Response) => {
   try {
-    const { walletAddress, label } = req.body;
+    const { walletAddress, label, category, description, isActive } = req.body;
     
     if (!walletAddress) {
       res.status(400).json({ error: "walletAddress is required" });
@@ -137,7 +162,9 @@ router.post("/", async (req: Request, res: Response) => {
     const whale = whaleRepository.create({
       walletAddress,
       label,
-      isActive: true,
+      category: category || "regular", // Default to "regular" if not specified
+      description,
+      isActive: isActive !== undefined ? isActive : true,
     });
     
     const savedWhale = await whaleRepository.save(whale);
@@ -175,6 +202,9 @@ router.post("/", async (req: Request, res: Response) => {
  *                 type: string
  *               description:
  *                 type: string
+ *               category:
+ *                 type: string
+ *                 description: Category/type of whale (e.g., "regular", "whale", "mega_whale")
  *               isActive:
  *                 type: boolean
  *               metadata:
@@ -196,10 +226,11 @@ router.put("/:id", async (req: Request, res: Response) => {
       return;
     }
     
-    const { label, description, isActive, metadata } = req.body;
+    const { label, description, category, isActive, metadata } = req.body;
     
     if (label !== undefined) whale.label = label;
     if (description !== undefined) whale.description = description;
+    if (category !== undefined) whale.category = category;
     if (isActive !== undefined) whale.isActive = isActive;
     if (metadata !== undefined) whale.metadata = metadata;
     
@@ -231,6 +262,10 @@ router.put("/:id", async (req: Request, res: Response) => {
  */
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
+    if (!req.params.id) {
+      res.status(400).json({ error: "Whale ID is required" });
+      return;
+    }
     const result = await whaleRepository.delete(req.params.id);
     
     if (result.affected === 0) {

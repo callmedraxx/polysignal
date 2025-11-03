@@ -3,6 +3,7 @@ import { AppDataSource } from "../config/database.js";
 import { WhaleActivity } from "../entities/WhaleActivity.js";
 import { TrackedWhale } from "../entities/TrackedWhale.js";
 import { discordService } from "../services/discord.service.js";
+import { detectCategoryFromMetadata } from "../utils/category-detector.js";
 
 const router = Router();
 const activityRepository = AppDataSource.getRepository(WhaleActivity);
@@ -27,6 +28,21 @@ const whaleRepository = AppDataSource.getRepository(TrackedWhale);
  *           type: string
  *         description: Filter by activity type
  *       - in: query
+ *         name: conditionId
+ *         schema:
+ *           type: string
+ *         description: Filter by conditionId (from metadata)
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *         description: Filter by status (e.g., open, added, partially_closed, closed)
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *         description: Filter by category (e.g., sports, crypto, politics, economic)
+ *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
@@ -44,7 +60,7 @@ const whaleRepository = AppDataSource.getRepository(TrackedWhale);
  */
 router.get("/", async (req: Request, res: Response) => {
   try {
-    const { whaleId, activityType, limit = "100" } = req.query;
+    const { whaleId, activityType, conditionId, status, category, limit = "100" } = req.query;
     
     const queryBuilder = activityRepository
       .createQueryBuilder("activity")
@@ -58,6 +74,18 @@ router.get("/", async (req: Request, res: Response) => {
     
     if (activityType) {
       queryBuilder.andWhere("activity.activityType = :activityType", { activityType });
+    }
+    
+    if (conditionId) {
+      queryBuilder.andWhere("activity.metadata->>'conditionId' = :conditionId", { conditionId });
+    }
+    
+    if (status) {
+      queryBuilder.andWhere("activity.status = :status", { status });
+    }
+    
+    if (category) {
+      queryBuilder.andWhere("activity.category = :category", { category });
     }
     
     const activities = await queryBuilder.getMany();
@@ -186,6 +214,38 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
     
+    // Check if activity meets storage criteria (USD value >= $500 AND price <= $0.95)
+    const usdValue = metadata?.usdValue ? parseFloat(metadata.usdValue) : 0;
+    const price = metadata?.price ? parseFloat(metadata.price) : null;
+    const MIN_USD_VALUE_FOR_STORAGE = 500;
+    const MAX_PRICE_FOR_STORAGE = 0.95;
+
+    if (usdValue < MIN_USD_VALUE_FOR_STORAGE || (price !== null && price > MAX_PRICE_FOR_STORAGE)) {
+      const reason = usdValue < MIN_USD_VALUE_FOR_STORAGE 
+        ? `USD value $${usdValue.toFixed(2)} < $${MIN_USD_VALUE_FOR_STORAGE}`
+        : price !== null 
+          ? `price $${price.toFixed(2)} > $${MAX_PRICE_FOR_STORAGE}`
+          : `price is null`;
+      res.status(400).json({ 
+        error: "Activity does not meet storage criteria", 
+        reason,
+        criteria: {
+          minUsdValue: MIN_USD_VALUE_FOR_STORAGE,
+          maxPrice: MAX_PRICE_FOR_STORAGE
+        }
+      });
+      return;
+    }
+    
+    // Detect category from metadata using intelligent keyword matching
+    const category = detectCategoryFromMetadata(metadata);
+    
+    if (category) {
+      console.log(
+        `📁 Category detected for ${whale.label || whale.walletAddress}: "${category}" (market: ${metadata?.market || "N/A"})`
+      );
+    }
+    
     const activity = activityRepository.create({
       whaleId,
       activityType,
@@ -196,6 +256,7 @@ router.post("/", async (req: Request, res: Response) => {
       toAddress,
       blockchain,
       metadata,
+      category: category || undefined, // Set the detected category (convert null to undefined)
       activityTimestamp: activityTimestamp ? new Date(activityTimestamp) : new Date(),
     });
     
@@ -203,14 +264,44 @@ router.post("/", async (req: Request, res: Response) => {
     
     // Send Discord notification if enabled
     if (sendDiscordNotification) {
-      await discordService.sendWhaleAlert({
-        walletAddress: whale.walletAddress,
-        activityType,
-        amount,
-        tokenSymbol,
-        transactionHash,
-        blockchain,
-      });
+      // Check price condition (only send if price <= $0.95)
+      const price = metadata?.price ? parseFloat(metadata.price) : null;
+      if (price === null || price > 0.95) {
+        console.log(
+          `⏭️  Skipping Discord notification (price $${price !== null ? price.toFixed(2) : 'N/A'} > $0.95) | Whale: ${whale.label || whale.walletAddress} | Activity: ${savedActivity.id}`
+        );
+      } else {
+        // Construct profile URL
+        const profileUrl = `https://polymarket.com/profile/${whale.walletAddress}`;
+        
+        // Construct market link using slug from metadata
+        const marketLink = metadata?.slug
+          ? `https://polymarket.com/market/${metadata.slug}`
+          : undefined;
+        
+        const messageId = await discordService.sendWhaleAlert({
+          walletAddress: whale.walletAddress,
+          traderName: whale.label,
+          profileUrl,
+          thumbnailUrl: metadata?.icon,
+          marketLink,
+          marketName: metadata?.market,
+          activityType,
+          shares: amount,
+          usdValue: metadata?.usdValue,
+          activityTimestamp: activityTimestamp ? new Date(activityTimestamp) : new Date(),
+          transactionHash,
+          blockchain,
+          whaleCategory: whale.category || "regular", // Pass whale category
+          tradeCategory: savedActivity.category || undefined, // Pass trade/market category
+        });
+
+        // Store Discord message ID if available
+        if (messageId) {
+          savedActivity.discordMessageId = messageId;
+          await activityRepository.save(savedActivity);
+        }
+      }
     }
     
     res.status(201).json(savedActivity);
@@ -320,6 +411,10 @@ router.put("/:id", async (req: Request, res: Response) => {
  */
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
+    if (!req.params.id) {
+      res.status(400).json({ error: "Activity ID is required" });
+      return;
+    }
     const result = await activityRepository.delete(req.params.id);
     
     if (result.affected === 0) {

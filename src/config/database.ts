@@ -2,6 +2,7 @@ import { DataSource } from "typeorm";
 import dotenv from "dotenv";
 import { TrackedWhale } from "../entities/TrackedWhale.js";
 import { WhaleActivity } from "../entities/WhaleActivity.js";
+import { ArbitrageOpportunity } from "../entities/ArbitrageOpportunity.js";
 
 dotenv.config();
 
@@ -12,9 +13,9 @@ export const AppDataSource = new DataSource({
   username: process.env.DATABASE_USER || "polysignal",
   password: process.env.DATABASE_PASSWORD || "polysignal123",
   database: process.env.DATABASE_NAME || "polysignal_db",
-  synchronize: true, // Set to false in production, use migrations instead
+  synchronize: true, // Auto-sync only in development 
   logging: process.env.NODE_ENV === "development",
-  entities: [TrackedWhale, WhaleActivity],
+  entities: [TrackedWhale, WhaleActivity, ArbitrageOpportunity],
   migrations: ["src/migrations/**/*.ts"],
   subscribers: [],
 });
