@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { AppDataSource } from "../config/database.js";
 import { TrackedWhale } from "../entities/TrackedWhale.js";
+import { tradePollingService } from "../services/trade-polling.service.js";
 
 const router = Router();
 const whaleRepository = AppDataSource.getRepository(TrackedWhale);
@@ -138,6 +139,12 @@ router.get("/:id", async (req: Request, res: Response) => {
  *                 enum: [500, 1000, 2000, 3000, 4000, 5000]
  *                 default: 500
  *                 example: 1000
+ *               frequency:
+ *                 type: integer
+ *                 nullable: true
+ *                 description: Custom frequency limit for initial buy trades per reset period (null = use default: 1 for free, 3 for paid)
+ *                 minimum: 0
+ *                 example: 5
  *               description:
  *                 type: string
  *                 description: Optional description of the whale
@@ -159,7 +166,7 @@ router.get("/:id", async (req: Request, res: Response) => {
  */
 router.post("/", async (req: Request, res: Response) => {
   try {
-    const { walletAddress, label, category, subscriptionType, description, isActive, minUsdValue } = req.body;
+    const { walletAddress, label, category, subscriptionType, description, isActive, minUsdValue, frequency } = req.body;
     
     if (!walletAddress) {
       res.status(400).json({ error: "walletAddress is required" });
@@ -193,6 +200,17 @@ router.post("/", async (req: Request, res: Response) => {
       }
     }
     
+    // Validate frequency if provided (must be positive integer or null)
+    if (frequency !== undefined && frequency !== null) {
+      const freqNum = parseInt(frequency, 10);
+      if (isNaN(freqNum) || freqNum < 0) {
+        res.status(400).json({ 
+          error: "frequency must be a positive integer or null" 
+        });
+        return;
+      }
+    }
+    
     const whale = whaleRepository.create({
       walletAddress,
       label,
@@ -200,6 +218,7 @@ router.post("/", async (req: Request, res: Response) => {
       subscriptionType: subscriptionType || "free", // Default to "free" if not specified
       description,
       minUsdValue: minUsdValue || 500, // Default to 500 if not specified
+      frequency: frequency !== undefined && frequency !== null ? parseInt(frequency, 10) : null,
       isActive: isActive !== undefined ? isActive : true,
     });
     
@@ -251,6 +270,12 @@ router.post("/", async (req: Request, res: Response) => {
  *                 description: Minimum USD value threshold for storing initial BUY trades
  *                 enum: [500, 1000, 2000, 3000, 4000, 5000]
  *                 example: 1000
+ *               frequency:
+ *                 type: integer
+ *                 nullable: true
+ *                 description: Custom frequency limit for initial buy trades per reset period (null = use default: 1 for free, 3 for paid)
+ *                 minimum: 0
+ *                 example: 5
  *               isActive:
  *                 type: boolean
  *               metadata:
@@ -272,7 +297,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       return;
     }
     
-    const { label, description, category, subscriptionType, isActive, metadata, minUsdValue } = req.body;
+    const { label, description, category, subscriptionType, isActive, metadata, minUsdValue, frequency } = req.body;
     
     // Validate minUsdValue if provided
     const ALLOWED_MIN_USD_VALUES = [500, 1000, 2000, 3000, 4000, 5000];
@@ -296,6 +321,22 @@ router.put("/:id", async (req: Request, res: Response) => {
         return;
       }
       whale.subscriptionType = subscriptionType;
+    }
+    
+    // Validate frequency if provided (must be positive integer or null)
+    if (frequency !== undefined) {
+      if (frequency === null) {
+        whale.frequency = null;
+      } else {
+        const freqNum = parseInt(frequency, 10);
+        if (isNaN(freqNum) || freqNum < 0) {
+          res.status(400).json({ 
+            error: "frequency must be a positive integer or null" 
+          });
+          return;
+        }
+        whale.frequency = freqNum;
+      }
     }
     
     if (label !== undefined) whale.label = label;
@@ -346,6 +387,110 @@ router.delete("/:id", async (req: Request, res: Response) => {
     res.json({ message: "Whale deleted successfully" });
   } catch (error) {
     res.status(500).json({ error: "Failed to delete whale", message: String(error) });
+  }
+});
+
+/**
+ * @swagger
+ * /api/whales/frequency/status:
+ *   get:
+ *     summary: Get frequency status for all active whales
+ *     tags: [Whales]
+ *     responses:
+ *       200:
+ *         description: Frequency status for all active whales
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   whaleId:
+ *                     type: string
+ *                     format: uuid
+ *                   remainingFrequency:
+ *                     type: integer
+ *                     description: Current remaining frequency count
+ *                   frequencyLimit:
+ *                     type: integer
+ *                     description: Maximum frequency limit for this whale
+ *                   resetTime:
+ *                     type: string
+ *                     format: date-time
+ *                     description: When the frequency will reset
+ *                   isCustom:
+ *                     type: boolean
+ *                     description: Whether this whale has a custom frequency set
+ */
+router.get("/frequency/status", async (req: Request, res: Response) => {
+  try {
+    const statuses = await tradePollingService.getAllWhalesFrequencyStatus();
+    res.json(statuses);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to get frequency status", message: String(error) });
+  }
+});
+
+/**
+ * @swagger
+ * /api/whales/{id}/frequency/status:
+ *   get:
+ *     summary: Get frequency status for a specific whale
+ *     tags: [Whales]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Frequency status for the whale
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 whaleId:
+ *                   type: string
+ *                   format: uuid
+ *                 remainingFrequency:
+ *                   type: integer
+ *                   description: Current remaining frequency count
+ *                 frequencyLimit:
+ *                   type: integer
+ *                   description: Maximum frequency limit for this whale
+ *                 resetTime:
+ *                   type: string
+ *                   format: date-time
+ *                   description: When the frequency will reset
+ *                 isCustom:
+ *                   type: boolean
+ *                   description: Whether this whale has a custom frequency set
+ *       404:
+ *         description: Whale not found
+ */
+router.get("/:id/frequency/status", async (req: Request, res: Response) => {
+  try {
+    const whaleId = req.params.id;
+    
+    if (!whaleId) {
+      res.status(400).json({ error: "Whale ID is required" });
+      return;
+    }
+    
+    const status = await tradePollingService.getWhaleFrequencyStatus(whaleId);
+    
+    if (!status) {
+      res.status(404).json({ error: "Whale not found" });
+      return;
+    }
+    
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to get frequency status", message: String(error) });
   }
 });
 

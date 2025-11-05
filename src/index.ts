@@ -12,7 +12,9 @@ import { swaggerSpec } from "./config/swagger.js";
 import whalesRouter from "./routes/whales.routes.js";
 import activitiesRouter from "./routes/activities.routes.js";
 import arbitragesRouter from "./routes/arbitrages.routes.js";
+import copytradeRouter from "./routes/copytrade.routes.js";
 import { tradePollingService } from "./services/trade-polling.service.js";
+import { googleSheetsService } from "./services/google-sheets.service.js";
 
 // Load environment variables
 dotenv.config();
@@ -52,6 +54,7 @@ app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.use("/api/whales", whalesRouter);
 app.use("/api/activities", activitiesRouter);
 app.use("/api/arbitrages", arbitragesRouter);
+app.use("/api/copytrade", copytradeRouter);
 
 // Root endpoint (must come after static to avoid overriding /admin.html)
 app.get("/", (req: Request, res: Response) => {
@@ -63,6 +66,7 @@ app.get("/", (req: Request, res: Response) => {
       whales: "/api/whales",
       activities: "/api/activities",
       arbitrages: "/api/arbitrages",
+      copytrade: "/api/copytrade",
       health: "/health",
     },
   });
@@ -85,6 +89,15 @@ const startServer = async () => {
     console.log("🔄 Connecting Discord bot...");
     await discordService.connect();
 
+    // Initialize Google Sheets service
+    console.log("🔄 Initializing Google Sheets service...");
+    try {
+      await googleSheetsService.initialize();
+    } catch (error) {
+      console.warn("⚠️  Google Sheets initialization failed, but continuing server startup...");
+      console.warn("   Copytrade data will be stored in database but not synced to Google Sheets");
+    }
+
     // Start trade polling service
     console.log("🔄 Starting trade polling service...");
     tradePollingService.start();
@@ -94,6 +107,7 @@ const startServer = async () => {
       console.log(`\n🚀 Server is running on port ${PORT}`);
       console.log(`📚 API Documentation: http://localhost:${PORT}/api-docs`);
       console.log(`👨‍💼 Admin Panel: http://localhost:${PORT}/admin.html`);
+      console.log(`📊 CopyTrade Admin: http://localhost:${PORT}/copytrade-admin.html`);
       console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
       console.log(`\n✨ Ready to track whale activities!\n`);
     });

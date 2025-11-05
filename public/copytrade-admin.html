@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolySignal - CopyTrade Admin</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .nav {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .nav a {
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            transition: background 0.3s;
+            font-weight: 600;
+        }
+
+        .nav a:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .nav a.active {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .section {
+            margin-bottom: 40px;
+        }
+
+        .section-title {
+            font-size: 1.8em;
+            color: #333;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #667eea;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .stat-card h3 {
+            font-size: 0.9em;
+            opacity: 0.9;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .label {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 8px;
+            font-size: 1.05em;
+        }
+
+        .form-group label .required {
+            color: #e74c3c;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            font-size: 1em;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 25px;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            font-size: 1.1em;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #7f8c8d;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+
+        .btn-success {
+            background: #27ae60;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #229954;
+        }
+
+        .btn-small {
+            padding: 8px 16px;
+            font-size: 0.9em;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .wallets-list,
+        .whales-list,
+        .positions-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+
+        .wallet-card,
+        .whale-card {
+            background: #f8f9fa;
+            border: 2px solid #e9ecef;
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s;
+        }
+
+        .wallet-card:hover,
+        .whale-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2);
+        }
+
+        .wallet-info,
+        .whale-info {
+            margin-bottom: 15px;
+        }
+
+        .wallet-info h3,
+        .whale-info h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.3em;
+        }
+
+        .wallet-info p,
+        .whale-info p {
+            color: #666;
+            margin: 5px 0;
+            font-size: 0.95em;
+        }
+
+        .wallet-actions,
+        .whale-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-right: 8px;
+            margin-top: 8px;
+        }
+
+        .badge-active {
+            background: #27ae60;
+            color: white;
+        }
+
+        .badge-inactive {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .badge-copytrade {
+            background: #f39c12;
+            color: white;
+        }
+
+        .positions-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        .positions-table th,
+        .positions-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .positions-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .positions-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .pnl-positive {
+            color: #27ae60;
+            font-weight: 600;
+        }
+
+        .pnl-negative {
+            color: #e74c3c;
+            font-weight: 600;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+
+        .empty-state-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+        }
+
+        .empty-state h3 {
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        @media (max-width: 768px) {
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 PolySignal CopyTrade</h1>
+            <p>Manage Copy Trading Wallets & Positions</p>
+            <nav class="nav">
+                <a href="/admin.html">🐋 Whales</a>
+                <a href="/copytrade-admin.html" class="active">📊 CopyTrade</a>
+                <a href="/api-docs" target="_blank">📚 API Docs</a>
+            </nav>
+        </div>
+
+        <div class="content">
+            <!-- Statistics Section -->
+            <div class="section">
+                <h2 class="section-title">📈 Statistics</h2>
+                <div id="statsAlert"></div>
+                <div id="statsLoading" class="loading">Loading statistics...</div>
+                <div id="statsGrid" class="stats-grid" style="display: none;">
+                    <!-- Stats will be populated here -->
+                </div>
+            </div>
+
+            <!-- Add CopyTrade Wallet Section -->
+            <div class="section">
+                <h2 class="section-title">➕ Add CopyTrade Wallet</h2>
+                <div id="addWalletAlert"></div>
+                <form id="addWalletForm">
+                    <div class="form-group">
+                        <label>Wallet Address <span class="required">*</span></label>
+                        <input type="text" id="walletAddress" placeholder="0x..." required>
+                    </div>
+                    <div class="form-group">
+                        <label>Label</label>
+                        <input type="text" id="label" placeholder="Optional label">
+                    </div>
+                    <div class="form-group">
+                        <label>Subscription Type</label>
+                        <select id="subscriptionType">
+                            <option value="free">Free</option>
+                            <option value="paid">Paid</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Simulated Investment (USD)</label>
+                        <input type="number" id="simulatedInvestment" value="500" min="1" step="0.01">
+                        <small style="color: #666; font-size: 0.9em;">Default: $500 per trade</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Duration to Track</label>
+                        <select id="durationHours">
+                            <option value="24">24 Hours</option>
+                            <option value="12">12 Hours</option>
+                        </select>
+                        <small style="color: #666; font-size: 0.9em;">How long to track trades for this wallet</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Description</label>
+                        <textarea id="description" placeholder="Optional description"></textarea>
+                    </div>
+                    <div class="button-group">
+                        <button type="submit" class="btn btn-primary" id="submitWalletBtn">Add Wallet</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Google Sheets Links -->
+            <div class="section">
+                <h2 class="section-title">📊 Google Sheets</h2>
+                <div id="sheetsAlert"></div>
+                <div id="sheetsLoading" class="loading">Loading spreadsheet info...</div>
+                <div id="sheetsInfo" style="display: none;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 2px solid #e9ecef;">
+                            <h3 style="margin-bottom: 10px; color: #333;">🆓 Free Signals Spreadsheet</h3>
+                            <div id="freeSheetLink" style="margin-bottom: 10px;">
+                                <a href="#" target="_blank" id="freeSheetUrl" style="color: #667eea; text-decoration: none; font-weight: 600;">Loading...</a>
+                            </div>
+                            <div style="font-size: 0.9em; color: #666;">
+                                <strong>ID:</strong> <span id="freeSheetId" style="font-family: monospace;">-</span>
+                            </div>
+                        </div>
+                        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 2px solid #e9ecef;">
+                            <h3 style="margin-bottom: 10px; color: #333;">💎 Paid Signals Spreadsheet</h3>
+                            <div id="paidSheetLink" style="margin-bottom: 10px;">
+                                <a href="#" target="_blank" id="paidSheetUrl" style="color: #667eea; text-decoration: none; font-weight: 600;">Loading...</a>
+                            </div>
+                            <div style="font-size: 0.9em; color: #666;">
+                                <strong>ID:</strong> <span id="paidSheetId" style="font-family: monospace;">-</span>
+                            </div>
+                        </div>
+                    </div>
+                    <p style="color: #666; font-size: 0.9em; margin-top: 10px;">
+                        <strong>Note:</strong> Positions are automatically added to these spreadsheets based on subscription type (free/paid).
+                        If spreadsheets don't exist, they will be created automatically on first trade.
+                    </p>
+                </div>
+            </div>
+
+            <!-- CopyTrade Wallets List -->
+            <div class="section">
+                <h2 class="section-title">💼 CopyTrade Wallets</h2>
+                <p style="margin-bottom: 20px; color: #666; font-size: 0.95em;">
+                    Copytrade-only wallets (no Discord alerts). Tracked whales in copytrade are shown below.
+                </p>
+                <div id="walletsAlert"></div>
+                <div id="walletsLoading" class="loading">Loading wallets...</div>
+                <div id="emptyWalletsState" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">💼</div>
+                    <h3>No copytrade wallets yet</h3>
+                    <p>Add your first copytrade wallet using the form above</p>
+                </div>
+                <div id="walletsList" class="wallets-list" style="display: none;"></div>
+            </div>
+
+            <!-- Tracked Whales in CopyTrade -->
+            <div class="section">
+                <h2 class="section-title">🐋 Tracked Whales in CopyTrade</h2>
+                <p style="margin-bottom: 20px; color: #666; font-size: 0.95em;">
+                    These whales send Discord alerts AND are tracked for copytrade simulation.
+                </p>
+                <div id="whalesInCopytradeAlert"></div>
+                <div id="whalesInCopytradeLoading" class="loading">Loading whales in copytrade...</div>
+                <div id="emptyWhalesInCopytradeState" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">🐋</div>
+                    <h3>No whales in copytrade yet</h3>
+                    <p>Add whales to copytrade using the section below</p>
+                </div>
+                <div id="whalesInCopytradeList" class="whales-list" style="display: none;"></div>
+            </div>
+
+            <!-- Add Whale to CopyTrade Section -->
+            <div class="section">
+                <h2 class="section-title">🐋 Add Whale to CopyTrade</h2>
+                <div id="addWhaleAlert"></div>
+                <p style="margin-bottom: 20px; color: #666;">
+                    Select a tracked whale to add to copytrade. These whales will continue sending Discord alerts AND be tracked for copytrade simulation.
+                </p>
+                <div id="whalesLoading" class="loading">Loading whales...</div>
+                <div id="emptyWhalesState" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">🐋</div>
+                    <h3>No tracked whales available</h3>
+                    <p>Add whales first in the <a href="/admin.html">Whales Admin</a></p>
+                </div>
+                <div id="whalesList" class="whales-list" style="display: none;"></div>
+            </div>
+
+            <!-- Positions Section -->
+            <div class="section">
+                <h2 class="section-title">📊 CopyTrade Positions</h2>
+                <div id="positionsAlert"></div>
+                <div id="positionsLoading" class="loading">Loading positions...</div>
+                <div id="emptyPositionsState" class="empty-state" style="display: none;">
+                    <div class="empty-state-icon">📊</div>
+                    <h3>No positions yet</h3>
+                    <p>Positions will appear here when copytrade wallets make trades</p>
+                </div>
+                <div id="positionsContainer" style="display: none;">
+                    <table class="positions-table">
+                        <thead>
+                            <tr>
+                                <th>Wallet</th>
+                                <th>Market</th>
+                                <th>Outcome</th>
+                                <th>Entry</th>
+                                <th>Exit</th>
+                                <th>Investment</th>
+                                <th>PnL</th>
+                                <th>% PnL</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positionsTableBody">
+                            <!-- Positions will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/copytrade';
+        const WHALES_API = '/api/whales';
+
+        // Helper functions
+        function showAlert(containerId, message, type = 'info') {
+            const container = document.getElementById(containerId);
+            container.innerHTML = `
+                <div class="alert alert-${type}">
+                    <span>${type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️'}</span>
+                    <span>${message}</span>
+                </div>
+            `;
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => container.innerHTML = '', 5000);
+            }
+        }
+
+        function formatAddress(address) {
+            if (!address) return '';
+            return `${address.slice(0, 6)}...${address.slice(-4)}`;
+        }
+
+        function formatCurrency(value) {
+            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value);
+        }
+
+        function formatPercent(value) {
+            if (value === null || value === undefined) return '-';
+            const sign = value >= 0 ? '+' : '';
+            return `${sign}${value.toFixed(2)}%`;
+        }
+
+        // Load statistics
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_BASE}/stats`);
+                if (!response.ok) throw new Error('Failed to load statistics');
+                const stats = await response.json();
+                
+                document.getElementById('statsLoading').style.display = 'none';
+                document.getElementById('statsGrid').style.display = 'grid';
+                
+                document.getElementById('statsGrid').innerHTML = `
+                    <div class="stat-card">
+                        <h3>Copytrade Wallets</h3>
+                        <div class="value">${stats.wallets.total}</div>
+                        <div class="label">Active wallets</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Whales in CopyTrade</h3>
+                        <div class="value">${stats.whales.total}</div>
+                        <div class="label">Active whales</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Total Positions</h3>
+                        <div class="value">${stats.positions.total}</div>
+                        <div class="label">${stats.positions.open} open, ${stats.positions.closed} closed</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Overall ROI</h3>
+                        <div class="value">${formatPercent(stats.performance.overallROI)}</div>
+                        <div class="label">${formatCurrency(stats.performance.totalPnL)} PnL</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Win Rate</h3>
+                        <div class="value">${stats.performance.winRate.toFixed(1)}%</div>
+                        <div class="label">${formatCurrency(stats.performance.totalInvested)} invested</div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+                showAlert('statsAlert', 'Failed to load statistics: ' + error.message, 'error');
+                document.getElementById('statsLoading').style.display = 'none';
+            }
+        }
+
+        // Load copytrade wallets
+        async function loadWallets() {
+            try {
+                const response = await fetch(`${API_BASE}/wallets`);
+                if (!response.ok) throw new Error('Failed to load wallets');
+                const wallets = await response.json();
+                
+                document.getElementById('walletsLoading').style.display = 'none';
+                
+                if (wallets.length === 0) {
+                    document.getElementById('emptyWalletsState').style.display = 'block';
+                    document.getElementById('walletsList').style.display = 'none';
+                    return;
+                }
+                
+                document.getElementById('emptyWalletsState').style.display = 'none';
+                document.getElementById('walletsList').style.display = 'grid';
+                
+                document.getElementById('walletsList').innerHTML = wallets.map(wallet => `
+                    <div class="wallet-card">
+                        <div class="wallet-info">
+                            <h3>${wallet.label || 'Unnamed'}</h3>
+                            <p><strong>Wallet:</strong> ${formatAddress(wallet.walletAddress)}</p>
+                            ${wallet.description ? `<p><strong>Description:</strong> ${wallet.description}</p>` : ''}
+                            <div>
+                                <span class="badge badge-${wallet.isActive ? 'active' : 'inactive'}">
+                                    ${wallet.isActive ? '✓ Active' : '✗ Inactive'}
+                                </span>
+                                <span class="badge" style="background: ${wallet.subscriptionType === 'paid' ? '#9b59b6' : '#3498db'}; color: white;">
+                                    ${wallet.subscriptionType === 'paid' ? '💎 Paid' : '🆓 Free'}
+                                </span>
+                                <span class="badge" style="background: #f39c12; color: white;">
+                                    $${parseFloat(wallet.simulatedInvestment).toLocaleString()}/trade
+                                </span>
+                                <span class="badge" style="background: #16a085; color: white;">
+                                    ${wallet.durationHours}h
+                                </span>
+                            </div>
+                        </div>
+                        <div class="wallet-actions">
+                            <button class="btn btn-danger btn-small" onclick="deleteWallet('${wallet.id}', '${wallet.label || wallet.walletAddress}')">
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading wallets:', error);
+                showAlert('walletsAlert', 'Failed to load wallets: ' + error.message, 'error');
+                document.getElementById('walletsLoading').style.display = 'none';
+            }
+        }
+
+        // Load tracked whales in copytrade
+        async function loadWhalesInCopytrade() {
+            try {
+                const response = await fetch(`${API_BASE}/whales`);
+                if (!response.ok) throw new Error('Failed to load whales in copytrade');
+                const whales = await response.json();
+                
+                document.getElementById('whalesInCopytradeLoading').style.display = 'none';
+                
+                if (whales.length === 0) {
+                    document.getElementById('emptyWhalesInCopytradeState').style.display = 'block';
+                    document.getElementById('whalesInCopytradeList').style.display = 'none';
+                    return;
+                }
+                
+                document.getElementById('emptyWhalesInCopytradeState').style.display = 'none';
+                document.getElementById('whalesInCopytradeList').style.display = 'grid';
+                
+                document.getElementById('whalesInCopytradeList').innerHTML = whales.map(whale => `
+                    <div class="whale-card">
+                        <div class="whale-info">
+                            <h3>${whale.label || 'Unnamed'}</h3>
+                            <p><strong>Wallet:</strong> ${formatAddress(whale.walletAddress)}</p>
+                            <div>
+                                <span class="badge badge-${whale.category === 'whale' ? 'whale' : 'regular'}">
+                                    ${whale.category === 'whale' ? '🐋 Whale' : '📊 Regular'}
+                                </span>
+                                <span class="badge badge-${whale.isActive ? 'active' : 'inactive'}">
+                                    ${whale.isActive ? '✓ Active' : '✗ Inactive'}
+                                </span>
+                                <span class="badge badge-copytrade">
+                                    📊 CopyTrade
+                                </span>
+                                <span class="badge" style="background: #f39c12; color: white;">
+                                    $${parseFloat(whale.copytradeInvestment || 500).toLocaleString()}/trade
+                                </span>
+                            </div>
+                        </div>
+                        <div class="whale-actions">
+                            <button class="btn btn-danger btn-small" onclick="removeWhaleFromCopytrade('${whale.id}', '${whale.label || whale.walletAddress}')">
+                                Remove from CopyTrade
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading whales in copytrade:', error);
+                showAlert('whalesInCopytradeAlert', 'Failed to load whales in copytrade: ' + error.message, 'error');
+                document.getElementById('whalesInCopytradeLoading').style.display = 'none';
+            }
+        }
+
+        // Load tracked whales (for adding to copytrade)
+        async function loadWhales() {
+            try {
+                const response = await fetch(WHALES_API);
+                if (!response.ok) throw new Error('Failed to load whales');
+                const whales = await response.json();
+                
+                // Filter out whales already in copytrade
+                const availableWhales = whales.filter(w => !w.isCopytrade);
+                
+                document.getElementById('whalesLoading').style.display = 'none';
+                
+                if (availableWhales.length === 0) {
+                    document.getElementById('emptyWhalesState').style.display = 'block';
+                    document.getElementById('whalesList').style.display = 'none';
+                    return;
+                }
+                
+                document.getElementById('emptyWhalesState').style.display = 'none';
+                document.getElementById('whalesList').style.display = 'grid';
+                
+                document.getElementById('whalesList').innerHTML = availableWhales.map(whale => `
+                    <div class="whale-card">
+                        <div class="whale-info">
+                            <h3>${whale.label || 'Unnamed'}</h3>
+                            <p><strong>Wallet:</strong> ${formatAddress(whale.walletAddress)}</p>
+                            <div>
+                                <span class="badge badge-${whale.category === 'whale' ? 'whale' : 'regular'}">
+                                    ${whale.category === 'whale' ? '🐋 Whale' : '📊 Regular'}
+                                </span>
+                                <span class="badge badge-${whale.isActive ? 'active' : 'inactive'}">
+                                    ${whale.isActive ? '✓ Active' : '✗ Inactive'}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="whale-actions">
+                            <button class="btn btn-success btn-small" onclick="addWhaleToCopytrade('${whale.id}', '${whale.label || whale.walletAddress}')">
+                                Add to CopyTrade
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading whales:', error);
+                document.getElementById('whalesLoading').style.display = 'none';
+            }
+        }
+
+        // Load Google Sheets info
+        async function loadSheetsInfo() {
+            try {
+                const response = await fetch(`${API_BASE}/spreadsheets`);
+                if (!response.ok) throw new Error('Failed to load spreadsheet info');
+                const data = await response.json();
+                
+                document.getElementById('sheetsLoading').style.display = 'none';
+                document.getElementById('sheetsInfo').style.display = 'block';
+                
+                if (data.urls.free) {
+                    document.getElementById('freeSheetUrl').href = data.urls.free;
+                    document.getElementById('freeSheetUrl').textContent = 'Open Free Signals Spreadsheet';
+                    document.getElementById('freeSheetId').textContent = data.ids.freeSpreadsheetId || 'Not created yet';
+                } else {
+                    document.getElementById('freeSheetLink').innerHTML = '<span style="color: #999;">Will be created automatically</span>';
+                    document.getElementById('freeSheetId').textContent = 'Not created yet';
+                }
+                
+                if (data.urls.paid) {
+                    document.getElementById('paidSheetUrl').href = data.urls.paid;
+                    document.getElementById('paidSheetUrl').textContent = 'Open Paid Signals Spreadsheet';
+                    document.getElementById('paidSheetId').textContent = data.ids.paidSpreadsheetId || 'Not created yet';
+                } else {
+                    document.getElementById('paidSheetLink').innerHTML = '<span style="color: #999;">Will be created automatically</span>';
+                    document.getElementById('paidSheetId').textContent = 'Not created yet';
+                }
+            } catch (error) {
+                console.error('Error loading sheets info:', error);
+                document.getElementById('sheetsLoading').style.display = 'none';
+            }
+        }
+
+        // Load positions
+        async function loadPositions() {
+            try {
+                const response = await fetch(`${API_BASE}/positions?limit=100`);
+                if (!response.ok) throw new Error('Failed to load positions');
+                const positions = await response.json();
+                
+                document.getElementById('positionsLoading').style.display = 'none';
+                
+                if (positions.length === 0) {
+                    document.getElementById('emptyPositionsState').style.display = 'block';
+                    document.getElementById('positionsContainer').style.display = 'none';
+                    return;
+                }
+                
+                document.getElementById('emptyPositionsState').style.display = 'none';
+                document.getElementById('positionsContainer').style.display = 'block';
+                
+                document.getElementById('positionsTableBody').innerHTML = positions.map(pos => {
+                    const pnl = parseFloat(pos.realizedPnl || 0);
+                    const percentPnl = pos.percentPnl || 0;
+                    const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                    
+                    return `
+                        <tr>
+                            <td>${formatAddress(pos.copyTradeWallet?.walletAddress || 'N/A')}</td>
+                            <td>${pos.marketName || 'N/A'}</td>
+                            <td>${pos.realizedOutcome || pos.outcome || 'N/A'}</td>
+                            <td>$${parseFloat(pos.entryPrice).toFixed(4)}<br><small>${new Date(pos.entryDate).toLocaleDateString()}</small></td>
+                            <td>${pos.exitPrice ? `$${parseFloat(pos.exitPrice).toFixed(4)}<br><small>${new Date(pos.exitDate).toLocaleDateString()}</small>` : '-'}</td>
+                            <td>${formatCurrency(parseFloat(pos.simulatedInvestment))}</td>
+                            <td class="${pnlClass}">${pnl !== 0 ? formatCurrency(pnl) : '-'}</td>
+                            <td class="${pnlClass}">${percentPnl !== 0 ? formatPercent(percentPnl) : '-'}</td>
+                            <td><span class="badge badge-${pos.status === 'closed' ? 'active' : 'inactive'}">${pos.status}</span></td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Error loading positions:', error);
+                showAlert('positionsAlert', 'Failed to load positions: ' + error.message, 'error');
+                document.getElementById('positionsLoading').style.display = 'none';
+            }
+        }
+
+        // Add copytrade wallet
+        document.getElementById('addWalletForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submitWalletBtn');
+            btn.disabled = true;
+            btn.textContent = 'Adding...';
+            
+            const formData = {
+                walletAddress: document.getElementById('walletAddress').value.trim(),
+                label: document.getElementById('label').value.trim() || undefined,
+                subscriptionType: document.getElementById('subscriptionType').value,
+                simulatedInvestment: parseFloat(document.getElementById('simulatedInvestment').value) || 500,
+                durationHours: parseInt(document.getElementById('durationHours').value) || 24,
+                description: document.getElementById('description').value.trim() || undefined
+            };
+            
+            try {
+                const response = await fetch(`${API_BASE}/wallets`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+                
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to add wallet');
+                
+                showAlert('addWalletAlert', `Successfully added copytrade wallet: ${formData.label || formData.walletAddress}`, 'success');
+                document.getElementById('addWalletForm').reset();
+                await loadWallets();
+                await loadStats();
+            } catch (error) {
+                showAlert('addWalletAlert', 'Error: ' + error.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Add Wallet';
+            }
+        });
+
+        // Add whale to copytrade
+        async function addWhaleToCopytrade(whaleId, name) {
+            if (!confirm(`Add "${name}" to copytrade?\n\nThis whale will continue sending Discord alerts AND be tracked for copytrade simulation.`)) {
+                return;
+            }
+            
+            const investment = prompt('Enter simulated investment per trade (USD):', '500');
+            if (!investment) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/whales/${whaleId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ copytradeInvestment: parseFloat(investment) || 500 })
+                });
+                
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to add whale to copytrade');
+                
+                showAlert('addWhaleAlert', `Successfully added "${name}" to copytrade`, 'success');
+                await loadWhales();
+                await loadWhalesInCopytrade();
+                await loadStats();
+            } catch (error) {
+                showAlert('addWhaleAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Remove whale from copytrade
+        async function removeWhaleFromCopytrade(whaleId, name) {
+            if (!confirm(`Remove "${name}" from copytrade?\n\nThis whale will continue sending Discord alerts but will no longer be tracked for copytrade simulation.`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/whales/${whaleId}`, {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to remove whale from copytrade');
+                
+                showAlert('whalesInCopytradeAlert', `Successfully removed "${name}" from copytrade`, 'success');
+                await loadWhales();
+                await loadWhalesInCopytrade();
+                await loadStats();
+            } catch (error) {
+                showAlert('whalesInCopytradeAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Delete copytrade wallet
+        async function deleteWallet(id, name) {
+            if (!confirm(`Delete copytrade wallet "${name}"?\n\nThis will also delete all associated positions.`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/wallets/${id}`, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to delete wallet');
+                
+                showAlert('walletsAlert', `Successfully deleted wallet: ${name}`, 'success');
+                await loadWallets();
+                await loadStats();
+                await loadPositions();
+            } catch (error) {
+                showAlert('walletsAlert', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        // Initialize on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            loadStats();
+            loadWallets();
+            loadWhales();
+            loadWhalesInCopytrade();
+            loadPositions();
+            loadSheetsInfo();
+            
+            // Refresh every 30 seconds
+            setInterval(() => {
+                loadStats();
+                loadPositions();
+            }, 30000);
+        });
+    </script>
+</body>
+</html>
+

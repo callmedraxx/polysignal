@@ -1,16 +1,26 @@
 import { AppDataSource } from "../config/database.js";
 import { TrackedWhale } from "../entities/TrackedWhale.js";
 import { WhaleActivity } from "../entities/WhaleActivity.js";
+import { CopyTradePosition } from "../entities/CopyTradePosition.js";
+import { CopyTradeWallet } from "../entities/CopyTradeWallet.js";
 import { polymarketService, type PolymarketTrade } from "./polymarket.service.js";
 import { discordService } from "./discord.service.js";
+import { googleSheetsService } from "./google-sheets.service.js";
 import { detectCategory } from "../utils/category-detector.js";
 import { inferCategoryFromTags } from "../utils/category-from-tags.js";
-import { IsNull } from "typeorm";
+import { IsNull, In } from "typeorm";
+
+interface WhaleFrequencyTracker {
+  whaleId: string;
+  frequency: number;
+  resetTime: Date;
+}
 
 class TradePollingService {
   private pollingInterval: NodeJS.Timeout | null = null;
   private positionPollingInterval: NodeJS.Timeout | null = null;
   private cleanupInterval: NodeJS.Timeout | null = null;
+  private frequencyResetInterval: NodeJS.Timeout | null = null;
   private readonly POLL_INTERVAL_MS = 5000; // 5 seconds (between 5-10 as requested)
   private readonly POSITION_POLL_INTERVAL_MS = 10000; // 10 seconds for position checks
   private readonly CLEANUP_INTERVAL_MS = 3600000; // 1 hour cleanup interval
@@ -19,12 +29,25 @@ class TradePollingService {
   private readonly MAX_PRICE_FOR_STORAGE = 0.95; // Maximum price to store in database
   private readonly MIN_USD_VALUE_FOR_DISCORD = 500; // Minimum USD value to send/update Discord messages
   private readonly ALLOWED_MIN_USD_VALUES = [500, 1000, 2000, 3000, 4000, 5000]; // Fixed allowed values
+  
+  // Frequency tracking: stores frequency counter per whale per reset period
+  private whaleFrequencyMap: Map<string, WhaleFrequencyTracker> = new Map();
+  
+  // Frequency reset interval in hours (default 24, configurable via env)
+  private readonly FREQUENCY_RESET_HOURS = parseInt(process.env.WHALE_FREQUENCY_RESET_HOURS || "24", 10);
+  
+  // Repositories
+  private readonly copytradePositionRepository = AppDataSource.getRepository(CopyTradePosition);
+  private readonly copytradeWalletRepository = AppDataSource.getRepository(CopyTradeWallet);
 
   constructor() {
     // Log configuration
     console.log(`💰 Trade storage thresholds: Using per-trader minUsdValue from database`);
     console.log(`   - Allowed values: $${this.ALLOWED_MIN_USD_VALUES.join(", $")}`);
     console.log(`   - Default for new traders: $500`);
+    console.log(`📊 Frequency tracking: Reset interval ${this.FREQUENCY_RESET_HOURS} hours`);
+    console.log(`   - Free subscription: 1 initial buy trade per period`);
+    console.log(`   - Paid subscription: 3 initial buy trades per period`);
   }
 
   /**
@@ -44,6 +67,193 @@ class TradePollingService {
   }
 
   /**
+   * Get default frequency based on subscription type
+   * Free: 1, Paid: 3
+   */
+  private getDefaultFrequency(subscriptionType: string): number {
+    return subscriptionType === "paid" ? 3 : 1;
+  }
+
+  /**
+   * Get frequency for a whale (custom from database or default based on subscription type)
+   */
+  private getWhaleFrequencyLimit(whale: TrackedWhale): number {
+    // If whale has a custom frequency set, use it
+    if (whale.frequency !== null && whale.frequency !== undefined) {
+      return whale.frequency;
+    }
+    // Otherwise use default based on subscription type
+    return this.getDefaultFrequency(whale.subscriptionType);
+  }
+
+  /**
+   * Get or initialize frequency tracker for a whale
+   * Returns current frequency count, initializing if needed or resetting if period expired
+   */
+  private getWhaleFrequency(whale: TrackedWhale): number {
+    const tracker = this.whaleFrequencyMap.get(whale.id);
+    const now = new Date();
+
+    // If no tracker exists or reset time has passed, initialize/reset
+    if (!tracker || now >= tracker.resetTime) {
+      const frequencyLimit = this.getWhaleFrequencyLimit(whale);
+      const resetTime = new Date(now.getTime() + this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000);
+      
+      this.whaleFrequencyMap.set(whale.id, {
+        whaleId: whale.id,
+        frequency: frequencyLimit,
+        resetTime: resetTime,
+      });
+
+      const frequencySource = whale.frequency !== null && whale.frequency !== undefined 
+        ? `custom (${whale.frequency})` 
+        : `default (${whale.subscriptionType})`;
+
+      if (!tracker) {
+        console.log(
+          `📊 Initialized frequency tracker for ${whale.label || whale.walletAddress} ` +
+          `(${frequencySource}): ${frequencyLimit} trades per ${this.FREQUENCY_RESET_HOURS} hours`
+        );
+      } else {
+        console.log(
+          `🔄 Reset frequency for ${whale.label || whale.walletAddress} ` +
+          `(${frequencySource}): ${frequencyLimit} trades per ${this.FREQUENCY_RESET_HOURS} hours`
+        );
+      }
+
+      return frequencyLimit;
+    }
+
+    return tracker.frequency;
+  }
+
+  /**
+   * Decrement frequency for a whale (called when storing an initial buy trade)
+   */
+  private decrementWhaleFrequency(whale: TrackedWhale): void {
+    const tracker = this.whaleFrequencyMap.get(whale.id);
+    if (!tracker) {
+      // Should not happen, but initialize if it does
+      this.getWhaleFrequency(whale);
+      return;
+    }
+
+    const now = new Date();
+    // If reset time has passed, reset first
+    if (now >= tracker.resetTime) {
+      this.getWhaleFrequency(whale);
+      return;
+    }
+
+    // Decrement frequency (ensure it doesn't go below 0)
+    tracker.frequency = Math.max(0, tracker.frequency - 1);
+    
+    console.log(
+      `📊 Frequency updated for ${whale.label || whale.walletAddress}: ` +
+      `${tracker.frequency} remaining (${whale.subscriptionType} subscription)`
+    );
+  }
+
+  /**
+   * Reset frequencies for all whales (called periodically)
+   */
+  private resetAllWhaleFrequencies(): void {
+    console.log(`🔄 Resetting frequencies for all whales...`);
+    const whaleRepository = AppDataSource.getRepository(TrackedWhale);
+    
+    whaleRepository.find({ where: { isActive: true } }).then((whales) => {
+      for (const whale of whales) {
+        this.getWhaleFrequency(whale); // This will reset if needed
+      }
+      console.log(`✅ Frequency reset complete for ${whales.length} active whales`);
+    }).catch((error) => {
+      console.error(`❌ Error resetting frequencies:`, error);
+    });
+  }
+
+  /**
+   * Get frequency status for a whale (public method for API access)
+   * Returns current remaining frequency, frequency limit, and reset time
+   */
+  async getWhaleFrequencyStatus(whaleId: string): Promise<{
+    whaleId: string;
+    remainingFrequency: number;
+    frequencyLimit: number;
+    resetTime: Date;
+    isCustom: boolean;
+  } | null> {
+    try {
+      const whale = await this.whaleRepository.findOne({
+        where: { id: whaleId },
+      });
+
+      if (!whale) {
+        return null;
+      }
+
+      const tracker = this.whaleFrequencyMap.get(whaleId);
+      const now = new Date();
+
+      // If no tracker exists or reset time has passed, initialize/reset
+      if (!tracker || now >= tracker.resetTime) {
+        const frequencyLimit = this.getWhaleFrequencyLimit(whale);
+        const resetTime = new Date(now.getTime() + this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000);
+        
+        this.whaleFrequencyMap.set(whaleId, {
+          whaleId: whaleId,
+          frequency: frequencyLimit,
+          resetTime: resetTime,
+        });
+
+        return {
+          whaleId: whaleId,
+          remainingFrequency: frequencyLimit,
+          frequencyLimit: frequencyLimit,
+          resetTime: resetTime,
+          isCustom: whale.frequency !== null && whale.frequency !== undefined,
+        };
+      }
+
+      return {
+        whaleId: whaleId,
+        remainingFrequency: tracker.frequency,
+        frequencyLimit: this.getWhaleFrequencyLimit(whale),
+        resetTime: tracker.resetTime,
+        isCustom: whale.frequency !== null && whale.frequency !== undefined,
+      };
+    } catch (error) {
+      console.error(`❌ Error getting frequency status for whale ${whaleId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Get frequency status for all active whales
+   */
+  async getAllWhalesFrequencyStatus(): Promise<Array<{
+    whaleId: string;
+    remainingFrequency: number;
+    frequencyLimit: number;
+    resetTime: Date;
+    isCustom: boolean;
+  }>> {
+    try {
+      const whales = await this.whaleRepository.find({
+        where: { isActive: true },
+      });
+
+      const statuses = await Promise.all(
+        whales.map(whale => this.getWhaleFrequencyStatus(whale.id))
+      );
+
+      return statuses.filter((status): status is NonNullable<typeof status> => status !== null);
+    } catch (error) {
+      console.error(`❌ Error getting frequency status for all whales:`, error);
+      return [];
+    }
+  }
+
+  /**
    * Send gainz alert for closed positions with high PnL
    */
   private async sendGainzAlertForActivity(
@@ -55,6 +265,20 @@ class TradePollingService {
       // Only send for closed positions with percentPnl
       // The threshold check is done inside sendGainzAlert
       if (activity.status !== "closed" || !activity.percentPnl) {
+        return;
+      }
+      
+      // Skip gainz alerts for losses (negative percentPnl)
+      if (activity.percentPnl < 0) {
+        console.log(`   ⏭️  Skipping gainz alert (loss detected: ${activity.percentPnl.toFixed(2)}%) | Activity: ${activity.id}`);
+        return;
+      }
+      
+      // Double-check: Ensure we haven't already sent this alert (additional safety check)
+      // This prevents duplicates on server restart
+      const activityMetadata = activity.metadata || {};
+      if (activityMetadata.gainzAlertSent === true) {
+        console.log(`   ⏭️  Skipping gainz alert - already sent for activity ${activity.id}`);
         return;
       }
 
@@ -282,6 +506,18 @@ class TradePollingService {
         console.error("❌ Error in cleanup interval:", error);
       });
     }, this.CLEANUP_INTERVAL_MS);
+
+    // Start frequency reset service
+    const frequencyResetIntervalMs = this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000;
+    console.log(`🔄 Starting frequency reset service (every ${this.FREQUENCY_RESET_HOURS} hours)`);
+    
+    // Run frequency reset immediately on start to initialize all whales
+    this.resetAllWhaleFrequencies();
+
+    // Set up frequency reset interval
+    this.frequencyResetInterval = setInterval(() => {
+      this.resetAllWhaleFrequencies();
+    }, frequencyResetIntervalMs);
   }
 
   /**
@@ -305,10 +541,16 @@ class TradePollingService {
       this.cleanupInterval = null;
       console.log("🛑 Cleanup service stopped");
     }
+
+    if (this.frequencyResetInterval) {
+      clearInterval(this.frequencyResetInterval);
+      this.frequencyResetInterval = null;
+      console.log("🛑 Frequency reset service stopped");
+    }
   }
 
   /**
-   * Poll trades for all active tracked whales
+   * Poll trades for all active tracked whales and copytrade-only wallets
    */
   private async pollAllWhales(): Promise<void> {
     if (this.isPolling) {
@@ -324,27 +566,114 @@ class TradePollingService {
         where: { isActive: true },
       });
 
-      if (activeWhales.length === 0) {
-        console.log("ℹ️  No active whales to track");
+      // Fetch all active copytrade-only wallets (not linked to tracked whales)
+      const activeCopytradeWallets = await this.copytradeWalletRepository.find({
+        where: { isActive: true, trackedWhaleId: IsNull() },
+      });
+
+      const totalToPoll = activeWhales.length + activeCopytradeWallets.length;
+
+      if (totalToPoll === 0) {
+        console.log("ℹ️  No active whales or copytrade wallets to track");
         return;
       }
 
-      console.log(`🐋 Polling trades for ${activeWhales.length} whale(s)...`);
+      const copytradeWhales = activeWhales.filter(w => w.isCopytrade).length;
+      console.log(
+        `🐋 Polling trades for ${activeWhales.length} whale(s) (${copytradeWhales} in copytrade) ` +
+        `and ${activeCopytradeWallets.length} copytrade-only wallet(s)...`
+      );
 
-      // Process each whale
-      const results = await Promise.allSettled(
+      // Process tracked whales
+      const whaleResults = await Promise.allSettled(
         activeWhales.map((whale) => this.pollWhaleTradesAndStore(whale))
       );
 
+      // Process copytrade-only wallets (convert to TrackedWhale-like structure for polling)
+      const copytradeResults = await Promise.allSettled(
+        activeCopytradeWallets.map((wallet) => this.pollCopytradeWalletTrades(wallet))
+      );
+
       // Log results
-      const successful = results.filter((r) => r.status === "fulfilled").length;
-      const failed = results.filter((r) => r.status === "rejected").length;
+      const successful = whaleResults.filter((r) => r.status === "fulfilled").length + 
+                        copytradeResults.filter((r) => r.status === "fulfilled").length;
+      const failed = whaleResults.filter((r) => r.status === "rejected").length + 
+                    copytradeResults.filter((r) => r.status === "rejected").length;
 
       console.log(`✅ Polling complete: ${successful} successful, ${failed} failed`);
     } catch (error) {
       console.error("❌ Error polling whales:", error);
     } finally {
       this.isPolling = false;
+    }
+  }
+
+  /**
+   * Poll trades for a copytrade-only wallet (not a tracked whale)
+   */
+  private async pollCopytradeWalletTrades(wallet: CopyTradeWallet): Promise<void> {
+    try {
+      // Fetch recent trades from Polymarket
+      const trades = await polymarketService.getUserTrades(
+        wallet.walletAddress,
+        { 
+          limit: 10,
+          takerOnly: false
+        }
+      );
+
+      if (trades.length === 0) {
+        return;
+      }
+
+      // Check which trades are new (by transaction hash)
+      // NOTE: For copytrade-only wallets, we check CopyTradePosition entries, not WhaleActivity
+      // This ensures copytrade-only wallets never create WhaleActivity entries that could trigger Discord alerts
+      const transactionHashes = trades.map(t => t.transactionHash);
+      const existingPositions = transactionHashes.length > 0
+        ? await this.copytradePositionRepository.find({
+            where: {
+              entryTransactionHash: In(transactionHashes),
+            },
+            select: ["entryTransactionHash"],
+          })
+        : [];
+      const existingHashSet = new Set(existingPositions.map(p => p.entryTransactionHash));
+      const newTrades = trades.filter(t => !existingHashSet.has(t.transactionHash));
+
+      if (newTrades.length === 0) {
+        return;
+      }
+
+      // Sort trades by timestamp (oldest first)
+      newTrades.sort((a, b) => a.timestamp - b.timestamp);
+
+      console.log(
+        `📊 Found ${newTrades.length} new trade(s) for copytrade wallet ${wallet.label || wallet.walletAddress} (NO Discord alerts will be sent)`
+      );
+
+      // Store new trades and create copytrade positions
+      for (const trade of newTrades) {
+        // Only process BUY trades that meet storage criteria
+        if (trade.side === "BUY") {
+          const usdValue = trade.size * trade.price;
+          const price = trade.price;
+          
+          // Apply same filtering as tracked whales
+          if (price > this.MAX_PRICE_FOR_STORAGE) {
+            continue;
+          }
+          
+          // Create copytrade position for every stored BUY trade
+          await this.createCopytradePositionForWallet(wallet, trade);
+        }
+      }
+    } catch (error) {
+      console.error(
+        `❌ Error polling trades for copytrade wallet ${wallet.label || wallet.walletAddress}:`,
+        error
+      );
+      throw error;
     }
   }
 
@@ -377,8 +706,9 @@ class TradePollingService {
       // The oldest qualifying trade becomes "open", subsequent ones become "added"
       newTrades.sort((a, b) => a.timestamp - b.timestamp);
 
+      const copytradeStatus = whale.isCopytrade ? " (CopyTrade Enabled)" : "";
       console.log(
-        `📊 Found ${newTrades.length} new trade(s) for ${whale.label || whale.walletAddress}`
+        `📊 Found ${newTrades.length} new trade(s) for ${whale.label || whale.walletAddress}${copytradeStatus}`
       );
 
       // Store new trades in database (only those meeting criteria)
@@ -572,6 +902,14 @@ class TradePollingService {
         if (!shouldSend) {
           console.log(
             `⏭️  Skipping Discord notification (status "${activity.status}" disabled for ${whaleCategory} traders) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+          );
+          continue;
+        }
+        
+        // Skip Discord notifications for closed trades with losses (negative percentPnl)
+        if (activity.status === "closed" && positionData.percentPnl !== undefined && positionData.percentPnl < 0) {
+          console.log(
+            `⏭️  Skipping Discord notification (loss detected: ${positionData.percentPnl.toFixed(2)}%) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
           );
           continue;
         }
@@ -781,9 +1119,9 @@ class TradePollingService {
 
   /**
    * Check if a trade meets storage criteria
-   * - SELL trades: no filtering
+   * - SELL trades: no filtering (always allow added, partially_closed, closed)
    * - Added BUY trades (with existing buy): no filtering
-   * - Initial BUY trades: filtering based on whale category (configurable via MIN_USD_VALUE_REGULAR and MIN_USD_VALUE_WHALE env vars) and price <= $0.95
+   * - Initial BUY trades: filtering based on whale category, price <= $0.95, and frequency limit
    */
   private async shouldStoreTrade(
     trade: PolymarketTrade,
@@ -792,22 +1130,23 @@ class TradePollingService {
     const usdValue = trade.size * trade.price;
     const price = trade.price;
     
-    // SELL trades: no filtering
+    // SELL trades: no filtering (always allow added, partially_closed, closed statuses)
     if (trade.side === "SELL") {
       return true;
     }
     
-    // BUY trades: check if there's an existing BUY trade for the same market
+    // BUY trades: check if there's an open BUY trade for the same market
+    // If there's an open buy, this will be an "added" trade, so no frequency check needed
     if (trade.side === "BUY" && trade.conditionId) {
-      const hasExisting = await this.hasExistingBuyTrade(trade.conditionId, whale.id, trade.outcomeIndex);
+      const hasOpenParent = await this.hasOpenBuyTrade(trade.conditionId, whale.id, trade.outcomeIndex);
       
-      // Added BUY trade (has existing buy): no filtering
-      if (hasExisting) {
+      // Added BUY trade (has open buy): no filtering (always allow)
+      if (hasOpenParent) {
         return true;
       }
     }
     
-    // Initial BUY trade: apply filtering based on whale category
+    // Initial BUY trade: apply filtering based on whale category, price, and frequency
     const minUsdValue = this.getMinUsdValueForStorage(whale);
     
     // Check USD value threshold
@@ -817,6 +1156,16 @@ class TradePollingService {
     
     // Check price threshold
     if (price > this.MAX_PRICE_FOR_STORAGE) {
+      return false;
+    }
+    
+    // Check frequency limit for initial buy trades
+    const currentFrequency = this.getWhaleFrequency(whale);
+    if (currentFrequency <= 0) {
+      console.log(
+        `⏭️  Skipping initial BUY trade (frequency limit reached: ${currentFrequency}) | ` +
+        `Whale: ${whale.label || whale.walletAddress} | Trade: ${trade.transactionHash}`
+      );
       return false;
     }
     
@@ -872,6 +1221,14 @@ class TradePollingService {
         // For SELL trades, check if market is still open for this specific outcome
         const marketIsOpen = await this.isMarketOpen(whale, trade.conditionId, trade.outcomeIndex);
         status = marketIsOpen ? "partially_closed" : "closed";
+      }
+
+      // Ensure status is defined before proceeding
+      if (!status) {
+        console.log(
+          `⏭️  Skipping trade with undefined status | Whale: ${whale.label || whale.walletAddress} | Trade: ${trade.side}`
+        );
+        return null;
       }
 
       // Validate that required parent trades exist for non-initial trades
@@ -975,6 +1332,29 @@ class TradePollingService {
       console.log(
         `✅ Stored ${trade.side} trade for ${whale.label || whale.walletAddress}: $${usdValue} | Status: ${status || 'N/A'}`
       );
+
+      // Decrement frequency for initial buy trades (status = "open")
+      // This happens after successfully storing the trade
+      if (trade.side === "BUY" && status === "open") {
+        this.decrementWhaleFrequency(whale);
+      }
+
+      // Create copytrade position if whale is in copytrade and this is a BUY trade (open or added)
+      if (whale.isCopytrade) {
+        if (trade.side === "BUY" && (status === "open" || status === "added")) {
+          console.log(
+            `📊 CopyTrade: Processing BUY trade for ${whale.label || whale.walletAddress} | ` +
+            `Status: ${status} | Market: ${trade.title} | Price: $${trade.price}`
+          );
+          await this.createCopytradePosition(whale, savedActivity, trade, status);
+        } else if (trade.side === "SELL" && status) {
+          console.log(
+            `📊 CopyTrade: Processing SELL trade for ${whale.label || whale.walletAddress} | ` +
+            `Status: ${status} | Market: ${trade.title} | Price: $${trade.price}`
+          );
+          await this.handleCopytradeSell(whale, savedActivity, trade, status);
+        }
+      }
 
       return savedActivity;
     } catch (error) {
@@ -1085,7 +1465,8 @@ class TradePollingService {
           // Check if this activity was already processed by checkFullyClosedPositions BEFORE we update metadata
           // This prevents duplicate alerts for the same closed position
           const activityMetadata = activity.metadata || {};
-          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined;
+          // Check both exitPrice and gainzAlertSent flag to prevent duplicates
+          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined || activityMetadata.gainzAlertSent === true;
           
           // Calculate exit price using formula: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
           const totalCost = closedPosition.totalBought * closedPosition.avgPrice;
@@ -1135,9 +1516,15 @@ class TradePollingService {
           // Only send gainz alert here if this activity wasn't handled by checkFullyClosedPositions
           // (i.e., if it was already closed before checkFullyClosedPositions ran)
           // This prevents duplicate alerts for the same closed position
-          if (wasNotClosed && percentPnl !== undefined && !wasHandledByFullyClosedCheck) {
+          // Only send for positive PnL (losses are skipped)
+          if (wasNotClosed && percentPnl !== undefined && percentPnl >= 0 && !wasHandledByFullyClosedCheck) {
             // Use updated metadata with exitPrice and realizedOutcome
             await this.sendGainzAlertForActivity(activity, whale, metadata);
+            // Mark that we sent the alert to prevent duplicates
+            if (!activity.metadata) {
+              activity.metadata = {};
+            }
+            activity.metadata.gainzAlertSent = true;
           }
         }
 
@@ -1297,35 +1684,42 @@ class TradePollingService {
               `🔄 Attempting to update Discord message | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId} | Status: ${activity.status}`
             );
 
-              // activity.discordMessageId is guaranteed to be defined by the if condition above
-              const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
-              walletAddress: whale.walletAddress,
-              traderName: whale.label,
-              profileUrl,
-              thumbnailUrl: metadata.icon,
-              marketLink,
-              marketName: metadata.market,
-              activityType: activity.activityType.replace('POLYMARKET_', ''),
-              shares: activity.amount,
-              totalShares: positionData.totalShares,
-              totalBought: positionData.totalBought,
-              usdValue: metadata.usdValue,
-              activityTimestamp: activity.activityTimestamp,
-              transactionHash: activity.transactionHash,
-              blockchain: "Polygon",
-              additionalInfo: `Outcome: ${metadata.outcome}\nPrice: $${parseFloat(metadata.price).toFixed(2)}`,
-              status: activity.status,
-              realizedPnl: activity.realizedPnl,
-              percentPnl: positionData.percentPnl,
-              whaleCategory: whale.category || "regular",
-              tradeCategory: activity.category || undefined,
-            });
+              // Skip Discord updates for closed trades with losses (negative percentPnl)
+              if (activity.status === "closed" && positionData.percentPnl !== undefined && positionData.percentPnl < 0) {
+                console.log(
+                  `⏭️  Skipping Discord update (loss detected: ${positionData.percentPnl.toFixed(2)}%) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                );
+              } else {
+                // activity.discordMessageId is guaranteed to be defined by the if condition above
+                const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
+                walletAddress: whale.walletAddress,
+                traderName: whale.label,
+                profileUrl,
+                thumbnailUrl: metadata.icon,
+                marketLink,
+                marketName: metadata.market,
+                activityType: activity.activityType.replace('POLYMARKET_', ''),
+                shares: activity.amount,
+                totalShares: positionData.totalShares,
+                totalBought: positionData.totalBought,
+                usdValue: metadata.usdValue,
+                activityTimestamp: activity.activityTimestamp,
+                transactionHash: activity.transactionHash,
+                blockchain: "Polygon",
+                additionalInfo: `Outcome: ${metadata.outcome}\nPrice: $${parseFloat(metadata.price).toFixed(2)}`,
+                status: activity.status,
+                realizedPnl: activity.realizedPnl,
+                percentPnl: positionData.percentPnl,
+                whaleCategory: whale.category || "regular",
+                tradeCategory: activity.category || undefined,
+              });
 
-            if (!updateSuccess) {
-              console.warn(
-                `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
-              );
-            }
+              if (!updateSuccess) {
+                console.warn(
+                  `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
+                );
+              }
+              }
             }
           } else if (activity.discordMessageId && !shouldUpdate) {
             const reason = usdValue < this.MIN_USD_VALUE_FOR_DISCORD 
@@ -1516,7 +1910,8 @@ class TradePollingService {
           // Check if this activity was already processed by checkFullyClosedPositions BEFORE we update metadata
           // This prevents duplicate alerts for the same closed position
           const activityMetadata = activity.metadata || {};
-          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined;
+          // Check both exitPrice and gainzAlertSent flag to prevent duplicates
+          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined || activityMetadata.gainzAlertSent === true;
           
           // Calculate exit price using formula: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
           const totalCost = closedPosition.totalBought * closedPosition.avgPrice;
@@ -1566,9 +1961,15 @@ class TradePollingService {
           // Only send gainz alert here if this activity wasn't handled by checkFullyClosedPositions
           // (i.e., if it was already closed before checkFullyClosedPositions ran)
           // This prevents duplicate alerts for the same closed position
-          if (wasNotClosed && percentPnl !== undefined && !wasHandledByFullyClosedCheck) {
+          // Only send for positive PnL (losses are skipped)
+          if (wasNotClosed && percentPnl !== undefined && percentPnl >= 0 && !wasHandledByFullyClosedCheck) {
             // Use updated metadata with exitPrice and realizedOutcome
             await this.sendGainzAlertForActivity(activity, whale, metadata);
+            // Mark that we sent the alert to prevent duplicates
+            if (!activity.metadata) {
+              activity.metadata = {};
+            }
+            activity.metadata.gainzAlertSent = true;
           }
         }
 
@@ -1728,35 +2129,42 @@ class TradePollingService {
               `🔄 Attempting to update Discord message | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId} | Status: ${activity.status}`
             );
 
-              // activity.discordMessageId is guaranteed to be defined by the if condition above
-              const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
-              walletAddress: whale.walletAddress,
-              traderName: whale.label,
-              profileUrl,
-              thumbnailUrl: metadata.icon,
-              marketLink,
-              marketName: metadata.market,
-              activityType: activity.activityType.replace('POLYMARKET_', ''),
-              shares: activity.amount,
-              totalShares: positionData.totalShares,
-              totalBought: positionData.totalBought,
-              usdValue: metadata.usdValue,
-              activityTimestamp: activity.activityTimestamp,
-              transactionHash: activity.transactionHash,
-              blockchain: "Polygon",
-              additionalInfo: `Outcome: ${metadata.outcome}\nPrice: $${parseFloat(metadata.price).toFixed(2)}`,
-              status: activity.status,
-              realizedPnl: activity.realizedPnl,
-              percentPnl: positionData.percentPnl,
-              whaleCategory: whale.category || "regular",
-              tradeCategory: activity.category || undefined,
-            });
+              // Skip Discord updates for closed trades with losses (negative percentPnl)
+              if (activity.status === "closed" && positionData.percentPnl !== undefined && positionData.percentPnl < 0) {
+                console.log(
+                  `⏭️  Skipping Discord update (loss detected: ${positionData.percentPnl.toFixed(2)}%) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                );
+              } else {
+                // activity.discordMessageId is guaranteed to be defined by the if condition above
+                const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
+                walletAddress: whale.walletAddress,
+                traderName: whale.label,
+                profileUrl,
+                thumbnailUrl: metadata.icon,
+                marketLink,
+                marketName: metadata.market,
+                activityType: activity.activityType.replace('POLYMARKET_', ''),
+                shares: activity.amount,
+                totalShares: positionData.totalShares,
+                totalBought: positionData.totalBought,
+                usdValue: metadata.usdValue,
+                activityTimestamp: activity.activityTimestamp,
+                transactionHash: activity.transactionHash,
+                blockchain: "Polygon",
+                additionalInfo: `Outcome: ${metadata.outcome}\nPrice: $${parseFloat(metadata.price).toFixed(2)}`,
+                status: activity.status,
+                realizedPnl: activity.realizedPnl,
+                percentPnl: positionData.percentPnl,
+                whaleCategory: whale.category || "regular",
+                tradeCategory: activity.category || undefined,
+              });
 
-            if (!updateSuccess) {
-              console.warn(
-                `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
-              );
-            }
+              if (!updateSuccess) {
+                console.warn(
+                  `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
+                );
+              }
+              }
             }
           } else if (activity.discordMessageId && !shouldUpdate) {
             const reason = usdValue < this.MIN_USD_VALUE_FOR_DISCORD 
@@ -1780,6 +2188,332 @@ class TradePollingService {
         error
       );
       throw error;
+    }
+  }
+
+  /**
+   * Handle SELL trades for copytrade positions
+   * Matches SELL trades to open copytrade positions using FIFO
+   */
+  private async handleCopytradeSell(
+    whale: TrackedWhale,
+    activity: WhaleActivity,
+    trade: PolymarketTrade,
+    status: string
+  ): Promise<void> {
+    try {
+      if (!trade.conditionId || trade.outcomeIndex === undefined) {
+        return;
+      }
+
+      // Find or create CopyTradeWallet for this tracked whale
+      let copytradeWallet = await this.copytradeWalletRepository.findOne({
+        where: { trackedWhaleId: whale.id },
+      });
+
+      if (!copytradeWallet) {
+        // Create a virtual CopyTradeWallet for this tracked whale
+        const investment = whale.copytradeInvestment || 500;
+        copytradeWallet = this.copytradeWalletRepository.create({
+          walletAddress: whale.walletAddress,
+          label: whale.label || `Whale: ${whale.walletAddress.slice(0, 8)}`,
+          subscriptionType: whale.subscriptionType || "free",
+          simulatedInvestment: investment,
+          durationHours: 24,
+          partialClosePercentage: 100, // Default 100%
+          isActive: true,
+          trackedWhaleId: whale.id,
+        });
+        copytradeWallet = await this.copytradeWalletRepository.save(copytradeWallet);
+      }
+
+      // Find all open copytrade positions for this market/outcome (FIFO order)
+      const openPositions = await this.copytradePositionRepository.find({
+        where: {
+          copyTradeWalletId: copytradeWallet.id,
+          conditionId: trade.conditionId,
+          outcomeIndex: trade.outcomeIndex,
+          status: "open",
+        },
+        order: {
+          entryDate: "ASC", // FIFO: oldest first
+        },
+      });
+
+      if (openPositions.length === 0) {
+        console.log(
+          `⚠️  No open copytrade positions found for SELL trade | Whale: ${whale.label || whale.walletAddress} | Market: ${trade.title}`
+        );
+        return;
+      }
+
+      const exitPrice = parseFloat(trade.price.toString());
+      const sharesSoldByWhale = parseFloat(trade.size.toString());
+      const partialClosePct = copytradeWallet.partialClosePercentage || 100;
+      
+      // Calculate total shares we have in open positions for this market/outcome
+      const totalOurShares = openPositions.reduce((sum, pos) => sum + parseFloat(pos.sharesBought), 0);
+      
+      let actualSharesToSell: number;
+      
+      if (status === "closed") {
+        // Fully closed: sell all our shares
+        actualSharesToSell = totalOurShares;
+      } else {
+        // Partially closed: calculate based on partial close percentage
+        // Step 1: Calculate what % of whale's tracked position was sold
+        // (Our tracked positions represent the whale's buys we've copied)
+        const whalePositionPercentageSold = totalOurShares > 0 
+          ? sharesSoldByWhale / totalOurShares 
+          : 0;
+        
+        // Step 2: Cap at 100% (whale can't sell more than we have tracked)
+        const cappedPercentage = Math.min(whalePositionPercentageSold, 1.0);
+        
+        // Step 3: Apply our partial close percentage setting
+        // If whale sold 50% of their position and partialClosePct = 100%, we sell 50% of ours
+        // If whale sold 50% and partialClosePct = 50%, we sell 25% of ours
+        const ourPositionPercentageToSell = cappedPercentage * (partialClosePct / 100);
+        
+        // Step 4: Calculate our shares to sell
+        const sharesToSell = totalOurShares * ourPositionPercentageToSell;
+        actualSharesToSell = Math.min(sharesToSell, totalOurShares);
+        
+        console.log(
+          `📊 CopyTrade Partial Close: Whale sold ${sharesSoldByWhale.toFixed(2)} shares ` +
+          `(${(cappedPercentage * 100).toFixed(1)}% of tracked position). ` +
+          `With ${partialClosePct}% setting, selling ${(ourPositionPercentageToSell * 100).toFixed(1)}% ` +
+          `(${actualSharesToSell.toFixed(2)} shares) of our ${totalOurShares.toFixed(2)} shares.`
+        );
+      }
+
+      let remainingSharesToSell = actualSharesToSell;
+
+      // Apply FIFO: sell from oldest positions first
+      for (const position of openPositions) {
+        if (remainingSharesToSell <= 0) break;
+
+        const positionShares = parseFloat(position.sharesBought);
+        const sharesToSellFromThis = Math.min(remainingSharesToSell, positionShares);
+        const remainingShares = positionShares - sharesToSellFromThis;
+
+        // Calculate PnL for this position
+        const entryPrice = parseFloat(position.entryPrice);
+        const costBasis = sharesToSellFromThis * entryPrice;
+        const proceeds = sharesToSellFromThis * exitPrice;
+        const realizedPnl = proceeds - costBasis;
+        const percentPnl = (realizedPnl / costBasis) * 100;
+        const finalValue = position.simulatedInvestment + realizedPnl;
+
+        if (remainingShares > 0) {
+          // Partial close: update position
+          position.status = "partially_closed";
+          position.sharesSold = sharesToSellFromThis.toString();
+          position.sharesBought = remainingShares.toString(); // Update remaining shares
+          position.exitPrice = exitPrice.toString();
+          position.exitDate = new Date(trade.timestamp * 1000);
+          position.exitTransactionHash = trade.transactionHash;
+          position.realizedPnl = realizedPnl.toString();
+          position.percentPnl = percentPnl;
+          position.finalValue = finalValue;
+        } else {
+          // Full close: mark as closed
+          position.status = "closed";
+          position.sharesSold = sharesToSellFromThis.toString();
+          position.exitPrice = exitPrice.toString();
+          position.exitDate = new Date(trade.timestamp * 1000);
+          position.exitTransactionHash = trade.transactionHash;
+          position.realizedPnl = realizedPnl.toString();
+          position.percentPnl = percentPnl;
+          position.finalValue = finalValue;
+        }
+
+        await this.copytradePositionRepository.save(position);
+        remainingSharesToSell -= sharesToSellFromThis;
+
+        console.log(
+          `📊 Updated copytrade position (${position.status}) for ${whale.label || whale.walletAddress}: ` +
+          `Sold ${sharesToSellFromThis.toFixed(2)} shares @ $${exitPrice.toFixed(4)} | ` +
+          `PnL: $${realizedPnl.toFixed(2)} (${percentPnl.toFixed(2)}%) | Market: ${trade.title}`
+        );
+
+        // Update Google Sheets
+        try {
+          await googleSheetsService.updatePosition(position.id, {
+            exitDate: position.exitDate,
+            exitPrice: position.exitPrice,
+            sharesSold: position.sharesSold,
+            realizedPnl: position.realizedPnl,
+            percentPnl: position.percentPnl,
+            finalValue: position.finalValue,
+            status: position.status,
+          });
+        } catch (sheetsError) {
+          console.error("⚠️  Failed to update Google Sheets:", sheetsError);
+        }
+      }
+    } catch (error) {
+      console.error("❌ Error handling copytrade SELL:", error);
+    }
+  }
+
+  /**
+   * Create a copytrade position for a tracked whale in copytrade
+   * Creates a position for EVERY stored BUY trade with the configured investment amount
+   */
+  private async createCopytradePosition(
+    whale: TrackedWhale,
+    activity: WhaleActivity,
+    trade: PolymarketTrade,
+    status: string
+  ): Promise<void> {
+    try {
+      // Get investment amount (default $500)
+      const investment = whale.copytradeInvestment || 500;
+      
+      // Calculate shares bought based on investment and entry price
+      const entryPrice = parseFloat(trade.price.toString());
+      const sharesBought = investment / entryPrice;
+      
+      // Find or create CopyTradeWallet for this tracked whale
+      let copytradeWallet = await this.copytradeWalletRepository.findOne({
+        where: { trackedWhaleId: whale.id },
+      });
+      
+      if (!copytradeWallet) {
+        // Create a virtual CopyTradeWallet for this tracked whale
+        copytradeWallet = this.copytradeWalletRepository.create({
+          walletAddress: whale.walletAddress,
+          label: whale.label || `Whale: ${whale.walletAddress.slice(0, 8)}`,
+          subscriptionType: whale.subscriptionType || "free",
+          simulatedInvestment: investment,
+          durationHours: 24,
+          partialClosePercentage: 100, // Default 100%
+          isActive: true,
+          trackedWhaleId: whale.id,
+        });
+        copytradeWallet = await this.copytradeWalletRepository.save(copytradeWallet);
+        console.log(`📊 Created virtual CopyTradeWallet for tracked whale: ${whale.label || whale.walletAddress}`);
+      }
+      
+      // Create copytrade position for this BUY trade
+      // Each BUY trade gets its own position with $500 (or configured amount) investment
+      const position = this.copytradePositionRepository.create({
+        copyTradeWalletId: copytradeWallet.id,
+        whaleActivityId: activity.id,
+        conditionId: trade.conditionId,
+        asset: trade.asset,
+        marketName: trade.title,
+        marketSlug: trade.slug,
+        outcome: trade.outcome,
+        outcomeIndex: trade.outcomeIndex,
+        simulatedInvestment: investment,
+        sharesBought: sharesBought.toString(),
+        entryPrice: entryPrice.toString(),
+        entryDate: new Date(trade.timestamp * 1000),
+        entryTransactionHash: trade.transactionHash,
+        status: "open",
+      });
+      
+      const savedPosition = await this.copytradePositionRepository.save(position);
+      
+      const statusLabel = status === "added" ? "added BUY" : "initial BUY";
+      console.log(
+        `📊 Created copytrade position (${statusLabel}) for ${whale.label || whale.walletAddress}: ` +
+        `$${investment} @ $${entryPrice.toFixed(4)} = ${sharesBought.toFixed(2)} shares | Market: ${trade.title}`
+      );
+      
+      // Calculate trader's actual USD value for this trade
+      const traderUsdValue = trade.size * trade.price;
+      
+      // Update Google Sheets
+      try {
+        await googleSheetsService.appendPosition({
+          walletAddress: whale.walletAddress,
+          traderName: whale.label,
+          subscriptionType: copytradeWallet.subscriptionType,
+          outcomeChosen: trade.outcome,
+          marketName: trade.title, // Market name
+          entryDateTime: new Date(trade.timestamp * 1000),
+          entryPrice: entryPrice.toString(),
+          simulatedInvestment: investment,
+          traderUsdValue: traderUsdValue, // Trader's actual USD value
+          sharesBought: sharesBought.toString(),
+          status: status, // "open" or "added"
+          positionId: savedPosition.id,
+          conditionId: trade.conditionId,
+          outcomeIndex: trade.outcomeIndex,
+        });
+      } catch (sheetsError) {
+        console.error("⚠️  Failed to update Google Sheets for copytrade position:", sheetsError);
+      }
+    } catch (error) {
+      console.error("❌ Error creating copytrade position:", error);
+    }
+  }
+
+  /**
+   * Create a copytrade position for a copytrade-only wallet (not a tracked whale)
+   */
+  private async createCopytradePositionForWallet(
+    wallet: CopyTradeWallet,
+    trade: PolymarketTrade
+  ): Promise<void> {
+    try {
+      const investment = wallet.simulatedInvestment || 500;
+      const entryPrice = parseFloat(trade.price.toString());
+      const sharesBought = investment / entryPrice;
+      
+      // Create copytrade position
+      const position = this.copytradePositionRepository.create({
+        copyTradeWalletId: wallet.id,
+        conditionId: trade.conditionId,
+        asset: trade.asset,
+        marketName: trade.title,
+        marketSlug: trade.slug,
+        outcome: trade.outcome,
+        outcomeIndex: trade.outcomeIndex,
+        simulatedInvestment: investment,
+        sharesBought: sharesBought.toString(),
+        entryPrice: entryPrice.toString(),
+        entryDate: new Date(trade.timestamp * 1000),
+        entryTransactionHash: trade.transactionHash,
+        status: "open",
+      });
+      
+      const savedPosition = await this.copytradePositionRepository.save(position);
+      
+      console.log(
+        `📊 Created copytrade position for wallet ${wallet.label || wallet.walletAddress}: ` +
+        `$${investment} @ $${entryPrice.toFixed(4)} = ${sharesBought.toFixed(2)} shares | Market: ${trade.title}`
+      );
+      
+      // Calculate trader's actual USD value for this trade
+      const traderUsdValue = trade.size * trade.price;
+      
+      // Update Google Sheets
+      try {
+        await googleSheetsService.appendPosition({
+          walletAddress: wallet.walletAddress,
+          traderName: wallet.label,
+          subscriptionType: wallet.subscriptionType,
+          outcomeChosen: trade.outcome,
+          marketName: trade.title, // Market name
+          entryDateTime: new Date(trade.timestamp * 1000),
+          entryPrice: entryPrice.toString(),
+          simulatedInvestment: investment,
+          traderUsdValue: traderUsdValue, // Trader's actual USD value
+          sharesBought: sharesBought.toString(),
+          status: "open", // Copytrade-only wallets always start with "open"
+          positionId: savedPosition.id,
+          conditionId: trade.conditionId,
+          outcomeIndex: trade.outcomeIndex,
+        });
+      } catch (sheetsError) {
+        console.error("⚠️  Failed to update Google Sheets for copytrade position:", sheetsError);
+      }
+    } catch (error) {
+      console.error("❌ Error creating copytrade position for wallet:", error);
     }
   }
 
@@ -1885,6 +2619,14 @@ class TradePollingService {
         const closedPosition = closedPositionsForMarket.get(asset);
         
         if (closedPosition) {
+          // Check if we already sent a gainz alert for this position BEFORE processing
+          // This prevents duplicate alerts on server restart
+          const existingMetadata = openBuyTrade.metadata || {};
+          if (existingMetadata.gainzAlertSent === true) {
+            console.log(`   ⏭️  Skipping gainz alert - already sent for activity ${openBuyTrade.id}`);
+            continue; // Skip this trade, alert was already sent
+          }
+          
           console.log(`   ✅ Found closed position match for ${whale.label || whale.walletAddress} | ConditionId: ${conditionId} | Asset: ${asset.substring(0, 20)}...`);
           
           // Always use realizedPnl from closed position API (it's accurate)
@@ -1959,26 +2701,33 @@ class TradePollingService {
           if (openBuyTrade.discordMessageId) {
             console.log(`   💬 Replying to Discord message for closed position | Original: ${openBuyTrade.discordMessageId}`);
             
-            // Check if alert should be sent for this status
-            const whaleCategoryForCheck = whale.category || "regular";
-            if (!discordService.shouldSendAlertForStatus(whaleCategoryForCheck, 'closed')) {
+            // Skip Discord notifications for losses (negative percentPnl)
+            if (percentPnl !== undefined && percentPnl < 0) {
               console.log(
-                `   ⏭️  Skipping Discord reply (status "closed" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress}`
+                `   ⏭️  Skipping Discord reply (loss detected: ${percentPnl.toFixed(2)}%) | Whale: ${whale.label || whale.walletAddress}`
               );
             } else {
-              const embed = discordService.buildWhaleAlertEmbed(alertData, whale.category || "regular");
-              const replyMessageId = await discordService.replyToMessage(
-                openBuyTrade.discordMessageId, 
-                embed,
-                whale.category || "regular",
-                openBuyTrade.category || undefined,
-                whale.subscriptionType || "free"
-              );
-              
-              if (replyMessageId) {
-                console.log(`   ✅ Discord reply sent successfully | Reply ID: ${replyMessageId}`);
+              // Check if alert should be sent for this status
+              const whaleCategoryForCheck = whale.category || "regular";
+              if (!discordService.shouldSendAlertForStatus(whaleCategoryForCheck, 'closed')) {
+                console.log(
+                  `   ⏭️  Skipping Discord reply (status "closed" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress}`
+                );
               } else {
-                console.warn(`   ⚠️  Failed to send Discord reply`);
+                const embed = discordService.buildWhaleAlertEmbed(alertData, whale.category || "regular");
+                const replyMessageId = await discordService.replyToMessage(
+                  openBuyTrade.discordMessageId, 
+                  embed,
+                  whale.category || "regular",
+                  openBuyTrade.category || undefined,
+                  whale.subscriptionType || "free"
+                );
+                
+                if (replyMessageId) {
+                  console.log(`   ✅ Discord reply sent successfully | Reply ID: ${replyMessageId}`);
+                } else {
+                  console.warn(`   ⚠️  Failed to send Discord reply`);
+                }
               }
             }
           } else {
@@ -1993,17 +2742,38 @@ class TradePollingService {
           // Update metadata with exit price and realized outcome (separate from original outcome)
           // Exit price is calculated using: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
           const updatedMetadata = openBuyTrade.metadata || {};
-          updatedMetadata.exitPrice = calculatedExitPrice; // Use calculated exit price (not curPrice)
+          
+          // Only update exit price if not already set (preserve original calculation to prevent duplicates)
+          if (!updatedMetadata.exitPrice) {
+            updatedMetadata.exitPrice = calculatedExitPrice; // Use calculated exit price (not curPrice)
+          }
+          
           // Store realized outcome separately (based on PNL) - don't overwrite original outcome
-          updatedMetadata.realizedOutcome = realizedOutcome; // The actual winning outcome (based on PNL sign)
-          updatedMetadata.realizedOutcomeIndex = realizedOutcomeIndex; // The index of the winning outcome
+          if (!updatedMetadata.realizedOutcome) {
+            updatedMetadata.realizedOutcome = realizedOutcome; // The actual winning outcome (based on PNL sign)
+            updatedMetadata.realizedOutcomeIndex = realizedOutcomeIndex; // The index of the winning outcome
+          }
+          
           openBuyTrade.metadata = updatedMetadata;
           
-          // Send gainz alert if this closed position has high PnL
-          if (percentPnl !== undefined) {
-            await this.sendGainzAlertForActivity(openBuyTrade, whale, updatedMetadata);
-          }
+          // Save activity FIRST to ensure metadata is persisted before sending alert
+          // This prevents duplicate alerts from checkAndUpdatePositions and on server restart
           await this.activityRepository.save(openBuyTrade);
+          
+          // Send gainz alert if this closed position has high PnL and alert wasn't already sent
+          // Only send for positive PnL (losses are skipped)
+          if (percentPnl !== undefined && percentPnl >= 0 && !existingMetadata.gainzAlertSent) {
+            await this.sendGainzAlertForActivity(openBuyTrade, whale, updatedMetadata);
+            
+            // Set flag AFTER successfully attempting to send to prevent duplicates
+            // sendGainzAlertForActivity has its own checks, but we set the flag here to prevent duplicates
+            // even if the alert doesn't meet threshold (to prevent re-processing)
+            if (!openBuyTrade.metadata) {
+              openBuyTrade.metadata = {};
+            }
+            openBuyTrade.metadata.gainzAlertSent = true;
+            await this.activityRepository.save(openBuyTrade);
+          }
           
           console.log(`   ✅ Updated open BUY trade status to closed in database | Activity: ${openBuyTrade.id}`);
         }

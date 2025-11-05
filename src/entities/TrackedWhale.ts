@@ -34,8 +34,17 @@ export class TrackedWhale {
   @Column({ type: "decimal", precision: 10, scale: 2, default: 500 })
   minUsdValue!: number; // Minimum USD value threshold for storing initial BUY trades (fixed values: 500, 1000, 2000, 3000, 4000, 5000)
 
+  @Column({ type: "integer", nullable: true })
+  frequency?: number | null; // Custom frequency limit for initial buy trades per reset period (null = use default based on subscriptionType)
+
   @Column({ type: "boolean", default: true })
   isActive!: boolean;
+
+  @Column({ type: "boolean", default: false })
+  isCopytrade!: boolean; // If true, also track for copytrade simulation
+
+  @Column({ type: "decimal", precision: 10, scale: 2, nullable: true })
+  copytradeInvestment?: number; // USD value to simulate per trade for copytrade (default $500 if isCopytrade is true)
 
   @Column({ type: "jsonb", nullable: true })
   metadata?: Record<string, any>;

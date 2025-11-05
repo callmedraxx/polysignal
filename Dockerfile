@@ -37,6 +37,9 @@ COPY --from=builder /app/src ./src
 # Copy public directory for admin UI
 COPY --from=builder /app/public ./public
 
+# Copy Google Service Account file if it exists (optional, can be mounted as volume)
+COPY --from=builder /app/google-service-account.json* ./
+
 # Copy ecosystem config for PM2
 COPY ecosystem.config.cjs ./
 

@@ -44,6 +44,32 @@
             opacity: 0.9;
         }
 
+        .nav {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .nav a {
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            transition: background 0.3s;
+            font-weight: 600;
+        }
+
+        .nav a:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .nav a.active {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
         .content {
             padding: 40px;
         }
@@ -367,6 +393,11 @@
         <div class="header">
             <h1>🐋 PolySignal Admin</h1>
             <p>Manage Tracked Whales</p>
+            <nav class="nav">
+                <a href="/admin.html" class="active">🐋 Whales</a>
+                <a href="/copytrade-admin.html">📊 CopyTrade</a>
+                <a href="/api-docs" target="_blank">📚 API Docs</a>
+            </nav>
         </div>
 
         <div class="content">
@@ -437,6 +468,22 @@
                         </select>
                         <small style="color: #666; margin-top: 5px; display: block;">
                             Minimum trade value threshold for storing initial BUY trades
+                        </small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="frequency">
+                            Frequency Limit (Optional)
+                        </label>
+                        <input 
+                            type="number" 
+                            id="frequency" 
+                            name="frequency" 
+                            min="0"
+                            placeholder="Leave empty for default (1 for free, 3 for paid)"
+                        >
+                        <small style="color: #666; margin-top: 5px; display: block;">
+                            Custom frequency limit for initial buy trades per reset period. Leave empty to use default based on subscription type.
                         </small>
                     </div>
 
@@ -549,6 +596,22 @@
                         </div>
 
                         <div class="form-group">
+                            <label for="editFrequency">
+                                Frequency Limit (Optional)
+                            </label>
+                            <input 
+                                type="number" 
+                                id="editFrequency" 
+                                name="frequency" 
+                                min="0"
+                                placeholder="Leave empty for default (1 for free, 3 for paid)"
+                            >
+                            <small style="color: #666; margin-top: 5px; display: block;">
+                                Custom frequency limit for initial buy trades per reset period. Leave empty to use default based on subscription type.
+                            </small>
+                        </div>
+
+                        <div class="form-group">
                             <label for="editDescription">
                                 Description (Optional)
                             </label>
@@ -628,6 +691,30 @@
             return `${address.slice(0, 6)}...${address.slice(-4)}`;
         }
 
+        // Frequency status cache (map of whaleId -> status)
+        let frequencyStatusCache = {};
+
+        // Load frequency status for all whales
+        async function loadFrequencyStatus() {
+            try {
+                const response = await fetch(`${API_BASE}/frequency/status`);
+                if (!response.ok) {
+                    throw new Error('Failed to load frequency status');
+                }
+                
+                const statuses = await response.json();
+                // Convert array to map for easy lookup
+                frequencyStatusCache = {};
+                statuses.forEach(status => {
+                    frequencyStatusCache[status.whaleId] = status;
+                });
+            } catch (error) {
+                console.error('Error loading frequency status:', error);
+                // Don't show error to user, just log it
+                frequencyStatusCache = {};
+            }
+        }
+
         // Load all whales
         async function loadWhales() {
             try {
@@ -637,6 +724,8 @@
                 }
                 
                 const whales = await response.json();
+                // Load frequency status in parallel
+                await loadFrequencyStatus();
                 displayWhales(whales);
             } catch (error) {
                 console.error('Error loading whales:', error);
@@ -681,7 +770,38 @@
                             <span class="badge" style="background: #f39c12; color: white;">
                                 Min: $${(whale.minUsdValue || 500).toLocaleString()}
                             </span>
+                            ${whale.frequency !== null && whale.frequency !== undefined ? `
+                            <span class="badge" style="background: #16a085; color: white;">
+                                Limit: ${whale.frequency}
+                            </span>
+                            ` : ''}
                         </div>
+                        ${(() => {
+                            const freqStatus = frequencyStatusCache[whale.id];
+                            if (freqStatus) {
+                                const remaining = freqStatus.remainingFrequency;
+                                const limit = freqStatus.frequencyLimit;
+                                const resetTime = new Date(freqStatus.resetTime);
+                                const now = new Date();
+                                const hoursUntilReset = Math.ceil((resetTime - now) / (1000 * 60 * 60));
+                                const isLow = remaining <= 1;
+                                const isZero = remaining === 0;
+                                
+                                return `
+                                    <div style="margin-top: 10px; padding: 8px; background: ${isZero ? '#fee' : isLow ? '#fff3cd' : '#e8f5e9'}; border-radius: 4px; border-left: 3px solid ${isZero ? '#f44336' : isLow ? '#ff9800' : '#4caf50'};">
+                                        <strong style="color: ${isZero ? '#d32f2f' : isLow ? '#f57c00' : '#2e7d32'};">
+                                            ${isZero ? '⚠️' : isLow ? '⚡' : '✓'} Frequency: ${remaining} / ${limit} remaining
+                                        </strong>
+                                        ${freqStatus.isCustom ? '<span style="color: #666; font-size: 0.85em;"> (Custom)</span>' : ''}
+                                        <br>
+                                        <span style="font-size: 0.85em; color: #666;">
+                                            Resets in ${hoursUntilReset} hour${hoursUntilReset !== 1 ? 's' : ''}
+                                        </span>
+                                    </div>
+                                `;
+                            }
+                            return '';
+                        })()}
                         <p style="margin-top: 10px; font-size: 0.85em; color: #999;">
                             Added: ${new Date(whale.createdAt).toLocaleDateString()}
                         </p>
@@ -712,12 +832,14 @@
             submitBtn.disabled = true;
             submitBtn.textContent = 'Adding...';
 
+            const frequencyValue = document.getElementById('frequency').value.trim();
             const formData = {
                 walletAddress: document.getElementById('walletAddress').value.trim(),
                 label: document.getElementById('label').value.trim(),
                 category: document.getElementById('category').value,
                 subscriptionType: document.getElementById('subscriptionType').value,
                 minUsdValue: parseInt(document.getElementById('minUsdValue').value),
+                frequency: frequencyValue ? parseInt(frequencyValue, 10) : null,
                 description: document.getElementById('description').value.trim() || undefined,
                 isActive: document.getElementById('isActive').checked
             };
@@ -792,6 +914,7 @@
                 document.getElementById('editCategory').value = whale.category || 'regular';
                 document.getElementById('editSubscriptionType').value = whale.subscriptionType || 'free';
                 document.getElementById('editMinUsdValue').value = whale.minUsdValue || 500;
+                document.getElementById('editFrequency').value = whale.frequency !== null && whale.frequency !== undefined ? whale.frequency : '';
                 document.getElementById('editDescription').value = whale.description || '';
                 document.getElementById('editIsActive').checked = whale.isActive !== false;
 
@@ -820,11 +943,13 @@
             submitBtn.textContent = 'Updating...';
 
             const whaleId = document.getElementById('editId').value;
+            const frequencyValue = document.getElementById('editFrequency').value.trim();
             const formData = {
                 label: document.getElementById('editLabel').value.trim(),
                 category: document.getElementById('editCategory').value,
                 subscriptionType: document.getElementById('editSubscriptionType').value,
                 minUsdValue: parseInt(document.getElementById('editMinUsdValue').value),
+                frequency: frequencyValue ? parseInt(frequencyValue, 10) : null,
                 description: document.getElementById('editDescription').value.trim() || undefined,
                 isActive: document.getElementById('editIsActive').checked
             };
@@ -864,8 +989,50 @@
             }
         });
 
+        // Auto-refresh frequency status every 30 seconds
+        let frequencyRefreshInterval = null;
+
+        function startFrequencyRefresh() {
+            // Clear existing interval if any
+            if (frequencyRefreshInterval) {
+                clearInterval(frequencyRefreshInterval);
+            }
+            
+            // Refresh frequency status every 30 seconds
+            frequencyRefreshInterval = setInterval(async () => {
+                await loadFrequencyStatus();
+                // Re-display whales to update frequency status
+                const response = await fetch(API_BASE);
+                if (response.ok) {
+                    const whales = await response.json();
+                    displayWhales(whales);
+                }
+            }, 30000); // 30 seconds
+        }
+
+        function stopFrequencyRefresh() {
+            if (frequencyRefreshInterval) {
+                clearInterval(frequencyRefreshInterval);
+                frequencyRefreshInterval = null;
+            }
+        }
+
         // Load whales on page load
-        loadWhales();
+        loadWhales().then(() => {
+            startFrequencyRefresh();
+        });
+
+        // Stop refresh when page is hidden (tab inactive)
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopFrequencyRefresh();
+            } else {
+                // Reload when tab becomes visible again
+                loadWhales().then(() => {
+                    startFrequencyRefresh();
+                });
+            }
+        });
     </script>
 </body>
 </html>
