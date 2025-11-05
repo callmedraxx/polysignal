@@ -1,5 +1,0 @@
-Wallet Address,Trader Name,Subscription Type,Outcome Chosen,Realized Outcome,Entry Date/Time,Entry Price,Simulated Investment,Shares Bought,Exit Date,Exit Price,Shares Sold,Realized PnL,Percent PnL,Final Value,ROI,Status,Hours Held
-0xee613b3fc183ee44f9da9c05f53e2da107e3debf,Blackhawks Trader,free,Blackhawks,Kraken,2025-11-03 10:30:00,0.40,500.00,1250.00,2025-11-04 15:45:00,0.0005,1250.00,-499.38,-99.88,0.62,-99.88,closed,29.25
-0xee613b3fc183ee44f9da9c05f53e2da107e3debf,Blackhawks Trader,free,Biden,Biden,2025-11-05 09:15:00,0.65,500.00,769.23,2025-11-06 14:20:00,0.85,769.23,153.85,30.77,653.85,30.77,closed,29.08
-0x1234567890abcdef1234567890abcdef12345678,CopyTrade Only Wallet,paid,BTC Up,BTC Up,2025-11-07 11:00:00,0.55,500.00,909.09,,,,,,,500.00,0.00,open,
-0x9876543210fedcba9876543210fedcba98765432,Whale Trader 2,paid,Team A Wins,Team B Wins,2025-11-08 16:30:00,0.70,500.00,714.29,2025-11-09 12:00:00,0.30,714.29,-285.71,-57.14,214.29,-57.14,closed,19.50

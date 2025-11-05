@@ -814,44 +814,48 @@ class GoogleSheetsService {
           const sheetId = await this.getSheetId(spreadsheetId, sheetName);
 
           // Batch update formulas for all rows using batchUpdate
+          // Column mapping: A=Wallet, B=Trader, C=SubType, D=Outcome, E=Market, F=RealizedOutcome,
+          // G=EntryDate, H=EntryPrice, I=SimInvestment, J=TraderUSD, K=SharesBought,
+          // L=ExitDate, M=ExitPrice, N=SharesSold, O=RealizedPnL, P=PercentPnL,
+          // Q=FinalValue, R=ROI, S=Status, T=HoursHeld, U=PositionGroup
           const formulaRequests = [];
           for (let i = 0; i < positions.length; i++) {
             const row = startRow + i;
             
-            // Shares Bought formula (Column I)
+            // Shares Bought formula (Column K) = Simulated Investment (I) / Entry Price (H)
             formulaRequests.push({
-              range: `${sheetName}!I${row}`,
-              values: [[`=IF(ISBLANK(H${row}), "", H${row} / G${row})`]],
+              range: `${sheetName}!K${row}`,
+              values: [[`=IF(ISBLANK(H${row}), "", I${row} / H${row})`]],
             });
 
-            // Realized PnL formula (Column M)
-            formulaRequests.push({
-              range: `${sheetName}!M${row}`,
-              values: [[`=IF(OR(ISBLANK(K${row}), ISBLANK(G${row}), ISBLANK(L${row})), "", (K${row} - G${row}) * L${row})`]],
-            });
-
-            // Percent PnL formula (Column N)
-            formulaRequests.push({
-              range: `${sheetName}!N${row}`,
-              values: [[`=IF(OR(ISBLANK(M${row}), ISBLANK(H${row})), "", (M${row} / H${row}) * 100)`]],
-            });
-
-            // Final Value formula (Column O)
+            // Realized PnL formula (Column O) = (Exit Price (M) - Entry Price (H)) * Shares Sold (N)
             formulaRequests.push({
               range: `${sheetName}!O${row}`,
-              values: [[`=IF(ISBLANK(M${row}), H${row}, H${row} + M${row})`]],
+              values: [[`=IF(OR(ISBLANK(M${row}), ISBLANK(H${row}), ISBLANK(N${row})), "", (M${row} - H${row}) * N${row})`]],
             });
 
-            // ROI formula (Column P)
+            // Percent PnL formula (Column P) = (Realized PnL (O) / Simulated Investment (I)) * 100
             formulaRequests.push({
               range: `${sheetName}!P${row}`,
-              values: [[`=IF(ISBLANK(N${row}), "", N${row})`]],
+              values: [[`=IF(OR(ISBLANK(O${row}), ISBLANK(I${row})), "", (O${row} / I${row}) * 100)`]],
             });
 
-            // Hours Held formula (Column R)
+            // Final Value formula (Column Q) = Simulated Investment (I) + Realized PnL (O)
+            formulaRequests.push({
+              range: `${sheetName}!Q${row}`,
+              values: [[`=IF(ISBLANK(O${row}), I${row}, I${row} + O${row})`]],
+            });
+
+            // ROI formula (Column R) = Same as Percent PnL (P)
             formulaRequests.push({
               range: `${sheetName}!R${row}`,
-              values: [[`=IF(ISBLANK(J${row}), "", (J${row} - F${row}) * 24)`]],
+              values: [[`=IF(ISBLANK(P${row}), "", P${row})`]],
+            });
+
+            // Hours Held formula (Column T) = (Exit Date (L) - Entry Date (G)) * 24
+            formulaRequests.push({
+              range: `${sheetName}!T${row}`,
+              values: [[`=IF(ISBLANK(L${row}), "", (L${row} - G${row}) * 24)`]],
             });
           }
 
