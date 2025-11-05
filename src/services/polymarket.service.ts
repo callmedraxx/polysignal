@@ -497,10 +497,14 @@ class PolymarketService {
     walletAddress: string,
     conditionIds?: string[],
     offset?: number,
-    limit?: number
+    limit?: number,
+    sortBy?: "REALIZEDPNL" | "TITLE" | "PRICE" | "AVGPRICE",
+    sortDirection?: "ASC" | "DESC"
   ): Promise<PolymarketClosedPosition[]> {
     try {
       const requestLimit = limit || 500; // Default to 500, max allowed
+      const sortByParam = sortBy || "REALIZEDPNL"; // Default to REALIZEDPNL
+      const sortDirectionParam = sortDirection || "DESC"; // Default to DESC
       
       // If no conditionIds provided, fetch all closed positions
       if (!conditionIds || conditionIds.length === 0) {
@@ -508,6 +512,8 @@ class PolymarketService {
           params: {
             user: walletAddress,
             limit: requestLimit,
+            sortBy: sortByParam,
+            sortDirection: sortDirectionParam,
             ...(offset !== undefined && { offset }),
           },
         });
@@ -522,11 +528,17 @@ class PolymarketService {
         const batch = conditionIds.slice(i, i + BATCH_SIZE);
         
         try {
+          // Polymarket API expects comma-separated values for the market parameter
+          // Join the array as CSV string to ensure correct format
+          const marketParam = batch.join(",");
+          
           const response = await this.client.get<PolymarketClosedPosition[]>("/closed-positions", {
             params: {
               user: walletAddress,
-              market: batch,
+              market: marketParam, // Use comma-separated string format as expected by API
               limit: requestLimit,
+              sortBy: sortByParam,
+              sortDirection: sortDirectionParam,
               ...(offset !== undefined && { offset }),
             },
           });
@@ -538,6 +550,8 @@ class PolymarketService {
               `❌ Error fetching closed positions batch for ${walletAddress} (batch ${Math.floor(i / BATCH_SIZE) + 1}):`,
               error.response?.data || error.message
             );
+            console.error(`   Request URL: ${error.config?.url}`);
+            console.error(`   Request params:`, error.config?.params);
           } else {
             console.error(`❌ Unexpected error fetching closed positions batch:`, error);
           }

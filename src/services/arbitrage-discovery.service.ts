@@ -18,9 +18,20 @@ interface ArbitrageCalculation {
 
 class ArbitrageDiscoveryService {
   private readonly MIN_SIMILARITY_SCORE = 0.3; // Minimum similarity to consider a match
-  private readonly MAX_ARBITRAGE_THRESHOLD = 100; // Markets should sum to < 100 for arbitrage
+  private readonly MAX_ARBITRAGE_THRESHOLD: number; // Markets should sum to < threshold for arbitrage (default: 97)
   private readonly MIN_LIQUIDITY = 100;
   private readonly DATE_TOLERANCE_DAYS = 30; // Markets should close within 30 days of each other
+
+  constructor() {
+    // Configure arbitrage threshold from environment variable (default: 97)
+    // Only deals that add up to less than this threshold are considered arbitrage
+    this.MAX_ARBITRAGE_THRESHOLD = parseFloat(
+      process.env.ARBITRAGE_THRESHOLD || "97"
+    );
+    
+    console.log(`💰 Arbitrage threshold configured: ${this.MAX_ARBITRAGE_THRESHOLD}%`);
+    console.log(`   (Only deals summing to < ${this.MAX_ARBITRAGE_THRESHOLD}% will be considered)`);
+  }
 
   /**
    * Normalize text for comparison (lowercase, remove special chars, trim)
@@ -207,6 +218,8 @@ class ArbitrageDiscoveryService {
 
   /**
    * Calculate arbitrage opportunities
+   * Only considers deals where sum < threshold (default 97)
+   * Margin is always positive (100 - sum)
    */
   private calculateArbitrage(
     polyPrices: { yesPrice: number; noPrice: number },
@@ -219,29 +232,54 @@ class ArbitrageDiscoveryService {
     // Strategy 2: Buy No on Polymarket + Buy Yes on Kalshi
     const noPolyPlusYesKalshi = polyPrices.noPrice * 100 + kalshiPrices.yesAsk * 100;
 
-    // Check if either strategy results in < 100 (arbitrage opportunity)
-    if (
-      yesPolyPlusNoKalshi < this.MAX_ARBITRAGE_THRESHOLD ||
-      noPolyPlusYesKalshi < this.MAX_ARBITRAGE_THRESHOLD
-    ) {
-      const bestMargin = Math.min(
-        100 - yesPolyPlusNoKalshi,
-        100 - noPolyPlusYesKalshi
-      );
-      const bestType =
-        yesPolyPlusNoKalshi < noPolyPlusYesKalshi
-          ? "yes_poly_no_kalshi"
-          : "no_poly_yes_kalshi";
+    // Only consider arbitrage if at least one strategy sums to < threshold
+    // Each strategy must have sum < threshold and margin must be positive
+    let validStrategies: Array<{
+      sum: number;
+      margin: number;
+      type: "yes_poly_no_kalshi" | "no_poly_yes_kalshi";
+    }> = [];
 
-      return {
-        yesPolyPlusNoKalshi,
-        noPolyPlusYesKalshi,
-        bestMargin,
-        bestType,
-      };
+    // Check Strategy 1: Yes Poly + No Kalshi
+    if (yesPolyPlusNoKalshi < this.MAX_ARBITRAGE_THRESHOLD) {
+      const margin = 100 - yesPolyPlusNoKalshi;
+      if (margin > 0) {
+        validStrategies.push({
+          sum: yesPolyPlusNoKalshi,
+          margin,
+          type: "yes_poly_no_kalshi",
+        });
+      }
     }
 
-    return null;
+    // Check Strategy 2: No Poly + Yes Kalshi
+    if (noPolyPlusYesKalshi < this.MAX_ARBITRAGE_THRESHOLD) {
+      const margin = 100 - noPolyPlusYesKalshi;
+      if (margin > 0) {
+        validStrategies.push({
+          sum: noPolyPlusYesKalshi,
+          margin,
+          type: "no_poly_yes_kalshi",
+        });
+      }
+    }
+
+    // Only return if we have at least one valid strategy with positive margin
+    if (validStrategies.length === 0) {
+      return null;
+    }
+
+    // Find the best strategy (highest margin = best arbitrage)
+    const bestStrategy = validStrategies.reduce((best, current) =>
+      current.margin > best.margin ? current : best
+    );
+
+    return {
+      yesPolyPlusNoKalshi,
+      noPolyPlusYesKalshi,
+      bestMargin: bestStrategy.margin, // Always positive since margin = 100 - sum and sum < threshold
+      bestType: bestStrategy.type,
+    };
   }
 
   /**

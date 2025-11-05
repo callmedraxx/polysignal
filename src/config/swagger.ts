@@ -58,6 +58,22 @@ const options: swaggerJsdoc.Options = {
               type: "boolean",
               description: "Whether tracking is active",
             },
+            category: {
+              type: "string",
+              description: "Category/type of whale (e.g., 'regular', 'whale', 'mega_whale')",
+            },
+            subscriptionType: {
+              type: "string",
+              description: "Subscription type (e.g., 'free', 'paid')",
+              enum: ["free", "paid"],
+              default: "free",
+            },
+            minUsdValue: {
+              type: "number",
+              description: "Minimum USD value threshold for storing initial BUY trades",
+              enum: [500, 1000, 2000, 3000, 4000, 5000],
+              default: 500,
+            },
             metadata: {
               type: "object",
               description: "Additional metadata",

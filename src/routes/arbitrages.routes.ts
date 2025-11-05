@@ -253,10 +253,12 @@ router.get("/", async (req: Request, res: Response) => {
     }
 
     if (verified !== undefined) {
-      const isVerified =
-        verified === "true" || verified === true || verified === "1";
+      // Parse verified parameter - can be string, boolean, or array from query params
+      const verifiedValue = Array.isArray(verified) ? verified[0] : verified;
+      const verifiedStr = String(verifiedValue).toLowerCase();
+      const isVerified = verifiedStr === "true" || verifiedStr === "1";
       queryBuilder.andWhere("arbitrage.isVerified = :verified", {
-        verified: Boolean(isVerified),
+        verified: isVerified,
       });
     }
 

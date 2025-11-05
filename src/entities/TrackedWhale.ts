@@ -28,6 +28,12 @@ export class TrackedWhale {
   @Column({ type: "varchar", length: 50, default: "regular" })
   category!: string; // e.g., "regular", "whale", "mega_whale", etc.
 
+  @Column({ type: "varchar", length: 50, default: "free" })
+  subscriptionType!: string; // "free" or "paid"
+
+  @Column({ type: "decimal", precision: 10, scale: 2, default: 500 })
+  minUsdValue!: number; // Minimum USD value threshold for storing initial BUY trades (fixed values: 500, 1000, 2000, 3000, 4000, 5000)
+
   @Column({ type: "boolean", default: true })
   isActive!: boolean;
 

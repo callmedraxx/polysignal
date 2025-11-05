@@ -12,12 +12,68 @@ interface ChannelConfig {
   economic?: string;
   whale?: string;
   whales?: string; // Alias for whale
+  gainz?: string; // Channel for high-profit closed positions
+  free?: string; // Channel for free subscription traders
+}
+
+interface MessageFieldConfig {
+  showShares: boolean;
+  showTotalShares: boolean;
+  showUsdValue: boolean;
+  showValueInTitle: boolean;
+  showWhen: boolean;
+  showType: boolean;
+  showStatus: boolean;
+  showPrice: boolean;
+  showOutcome: boolean;
+  showEntryPrice: boolean;
+  showExitPrice: boolean;
+  showRealizedPnl: boolean;
+}
+
+interface StatusAlertConfig {
+  sendForAdded: boolean;
+  sendForOpen: boolean;
+  sendForClosed: boolean;
+  sendForPartiallyClosed: boolean;
+}
+
+interface GainzAlertConfig {
+  showMarket: boolean;
+  showTrader: boolean;
+  showProfitPercent: boolean;
+  showRealizedPnl: boolean;
+  showPositionValue: boolean;
+  showWhen: boolean;
+  showCategory: boolean;
+  showThumbnail: boolean;
+  showFooter: boolean;
+  showTimestamp: boolean;
+  showEntryPrice: boolean;
+  showExitPrice: boolean;
+  showOutcome: boolean;
+}
+
+/**
+ * Helper to parse boolean from environment variable
+ * Defaults to false if not set or invalid
+ */
+function parseBooleanEnv(key: string, defaultValue: boolean = false): boolean {
+  const value = process.env[key];
+  if (!value) return defaultValue;
+  return value.toLowerCase() === "true" || value === "1";
 }
 
 class DiscordService {
   private client: Client;
   private channels: ChannelConfig;
   private isReady: boolean = false;
+  private messageFields: MessageFieldConfig; // For regular traders
+  private whaleMessageFields: MessageFieldConfig; // For whale category traders
+  private statusAlerts: StatusAlertConfig; // For regular traders
+  private whaleStatusAlerts: StatusAlertConfig; // For whale category traders
+  private gainzThreshold: number;
+  private gainzAlertConfig: GainzAlertConfig; // For gainz alerts
 
   constructor() {
     this.client = new Client({
@@ -42,7 +98,138 @@ class DiscordService {
       whale: getEnvVar("DISCORD_WHALE_CHANNEL_ID") || getEnvVar("DISCORD_WHALES_CHANNEL_ID"),
       politics: getEnvVar("DISCORD_POLITICS_CHANNEL_ID"),
       economic: getEnvVar("DISCORD_ECONOMIC_CHANNEL_ID"),
+      gainz: getEnvVar("DISCORD_GAINZ_CHANNEL_ID"),
+      free: getEnvVar("DISCORD_FREE_CHANNEL_ID"),
     };
+
+    // Configure message field visibility from environment variables for regular traders
+    // Defaults: all fields shown (true) except shares/totalShares/usdValue/valueInTitle (false for backward compatibility)
+    this.messageFields = {
+      showShares: parseBooleanEnv("DISCORD_SHOW_SHARES", false),
+      showTotalShares: parseBooleanEnv("DISCORD_SHOW_TOTAL_SHARES", false),
+      showUsdValue: parseBooleanEnv("DISCORD_SHOW_USD_VALUE", false),
+      showValueInTitle: parseBooleanEnv("DISCORD_SHOW_VALUE_IN_TITLE", false),
+      showWhen: parseBooleanEnv("DISCORD_SHOW_WHEN", true),
+      showType: parseBooleanEnv("DISCORD_SHOW_TYPE", true),
+      showStatus: parseBooleanEnv("DISCORD_SHOW_STATUS", true),
+      showPrice: parseBooleanEnv("DISCORD_SHOW_PRICE", true),
+      showOutcome: parseBooleanEnv("DISCORD_SHOW_OUTCOME", true),
+      showEntryPrice: parseBooleanEnv("DISCORD_SHOW_ENTRY_PRICE", true),
+      showExitPrice: parseBooleanEnv("DISCORD_SHOW_EXIT_PRICE", true),
+      showRealizedPnl: parseBooleanEnv("DISCORD_SHOW_REALIZED_PNL", true),
+    };
+
+    // Configure message field visibility for whale category traders (separate controls)
+    // Defaults: all fields shown (true) except shares/totalShares/usdValue/valueInTitle (false for backward compatibility)
+    this.whaleMessageFields = {
+      showShares: parseBooleanEnv("DISCORD_WHALE_SHOW_SHARES", false),
+      showTotalShares: parseBooleanEnv("DISCORD_WHALE_SHOW_TOTAL_SHARES", false),
+      showUsdValue: parseBooleanEnv("DISCORD_WHALE_SHOW_USD_VALUE", false),
+      showValueInTitle: parseBooleanEnv("DISCORD_WHALE_SHOW_VALUE_IN_TITLE", false),
+      showWhen: parseBooleanEnv("DISCORD_WHALE_SHOW_WHEN", true),
+      showType: parseBooleanEnv("DISCORD_WHALE_SHOW_TYPE", true),
+      showStatus: parseBooleanEnv("DISCORD_WHALE_SHOW_STATUS", true),
+      showPrice: parseBooleanEnv("DISCORD_WHALE_SHOW_PRICE", true),
+      showOutcome: parseBooleanEnv("DISCORD_WHALE_SHOW_OUTCOME", true),
+      showEntryPrice: parseBooleanEnv("DISCORD_WHALE_SHOW_ENTRY_PRICE", true),
+      showExitPrice: parseBooleanEnv("DISCORD_WHALE_SHOW_EXIT_PRICE", true),
+      showRealizedPnl: parseBooleanEnv("DISCORD_WHALE_SHOW_REALIZED_PNL", true),
+    };
+
+    // Configure status-based alert controls for regular traders
+    // Defaults: all statuses enabled (true)
+    this.statusAlerts = {
+      sendForAdded: parseBooleanEnv("DISCORD_SEND_FOR_ADDED", true),
+      sendForOpen: parseBooleanEnv("DISCORD_SEND_FOR_OPEN", true),
+      sendForClosed: parseBooleanEnv("DISCORD_SEND_FOR_CLOSED", true),
+      sendForPartiallyClosed: parseBooleanEnv("DISCORD_SEND_FOR_PARTIALLY_CLOSED", true),
+    };
+
+    // Configure status-based alert controls for whale category traders
+    // Defaults: all statuses enabled (true)
+    this.whaleStatusAlerts = {
+      sendForAdded: parseBooleanEnv("DISCORD_WHALE_SEND_FOR_ADDED", true),
+      sendForOpen: parseBooleanEnv("DISCORD_WHALE_SEND_FOR_OPEN", true),
+      sendForClosed: parseBooleanEnv("DISCORD_WHALE_SEND_FOR_CLOSED", true),
+      sendForPartiallyClosed: parseBooleanEnv("DISCORD_WHALE_SEND_FOR_PARTIALLY_CLOSED", true),
+    };
+
+    // Log field configuration
+    console.log(`📋 Discord message field configuration (Regular traders):`);
+    console.log(`   - Show Shares: ${this.messageFields.showShares}`);
+    console.log(`   - Show Total Shares: ${this.messageFields.showTotalShares}`);
+    console.log(`   - Show USD Value: ${this.messageFields.showUsdValue}`);
+    console.log(`   - Show Value in Title: ${this.messageFields.showValueInTitle}`);
+    console.log(`   - Show When: ${this.messageFields.showWhen}`);
+    console.log(`   - Show Type: ${this.messageFields.showType}`);
+    console.log(`   - Show Status: ${this.messageFields.showStatus}`);
+    console.log(`   - Show Price: ${this.messageFields.showPrice}`);
+    console.log(`   - Show Outcome: ${this.messageFields.showOutcome}`);
+    
+    console.log(`📋 Discord message field configuration (Whale traders):`);
+    console.log(`   - Show Shares: ${this.whaleMessageFields.showShares}`);
+    console.log(`   - Show Total Shares: ${this.whaleMessageFields.showTotalShares}`);
+    console.log(`   - Show USD Value: ${this.whaleMessageFields.showUsdValue}`);
+    console.log(`   - Show Value in Title: ${this.whaleMessageFields.showValueInTitle}`);
+    console.log(`   - Show When: ${this.whaleMessageFields.showWhen}`);
+    console.log(`   - Show Type: ${this.whaleMessageFields.showType}`);
+    console.log(`   - Show Status: ${this.whaleMessageFields.showStatus}`);
+    console.log(`   - Show Price: ${this.whaleMessageFields.showPrice}`);
+    console.log(`   - Show Outcome: ${this.whaleMessageFields.showOutcome}`);
+    
+    console.log(`📋 Discord status alert configuration (Regular traders):`);
+    console.log(`   - Send for Added: ${this.statusAlerts.sendForAdded}`);
+    console.log(`   - Send for Open: ${this.statusAlerts.sendForOpen}`);
+    console.log(`   - Send for Closed: ${this.statusAlerts.sendForClosed}`);
+    console.log(`   - Send for Partially Closed: ${this.statusAlerts.sendForPartiallyClosed}`);
+    
+    console.log(`📋 Discord status alert configuration (Whale traders):`);
+    console.log(`   - Send for Added: ${this.whaleStatusAlerts.sendForAdded}`);
+    console.log(`   - Send for Open: ${this.whaleStatusAlerts.sendForOpen}`);
+    console.log(`   - Send for Closed: ${this.whaleStatusAlerts.sendForClosed}`);
+    console.log(`   - Send for Partially Closed: ${this.whaleStatusAlerts.sendForPartiallyClosed}`);
+    
+    // Configure gainz alert threshold
+    this.gainzThreshold = parseFloat(process.env.DISCORD_GAINZ_THRESHOLD || "50");
+    console.log(`🎯 Gainz alert threshold: ${this.gainzThreshold}%`);
+    if (this.channels.gainz) {
+      console.log(`   - Gainz channel: ${this.channels.gainz}`);
+    } else {
+      console.log(`   - Gainz channel: not configured`);
+    }
+
+    // Configure gainz alert field visibility
+    // Defaults: all fields shown (true)
+    this.gainzAlertConfig = {
+      showMarket: parseBooleanEnv("DISCORD_GAINZ_SHOW_MARKET", true),
+      showTrader: parseBooleanEnv("DISCORD_GAINZ_SHOW_TRADER", true),
+      showProfitPercent: parseBooleanEnv("DISCORD_GAINZ_SHOW_PROFIT_PERCENT", true),
+      showRealizedPnl: parseBooleanEnv("DISCORD_GAINZ_SHOW_REALIZED_PNL", true),
+      showPositionValue: parseBooleanEnv("DISCORD_GAINZ_SHOW_POSITION_VALUE", true),
+      showWhen: parseBooleanEnv("DISCORD_GAINZ_SHOW_WHEN", true),
+      showCategory: parseBooleanEnv("DISCORD_GAINZ_SHOW_CATEGORY", true),
+      showThumbnail: parseBooleanEnv("DISCORD_GAINZ_SHOW_THUMBNAIL", true),
+      showFooter: parseBooleanEnv("DISCORD_GAINZ_SHOW_FOOTER", true),
+      showTimestamp: parseBooleanEnv("DISCORD_GAINZ_SHOW_TIMESTAMP", true),
+      showEntryPrice: parseBooleanEnv("DISCORD_GAINZ_SHOW_ENTRY_PRICE", true),
+      showExitPrice: parseBooleanEnv("DISCORD_GAINZ_SHOW_EXIT_PRICE", true),
+      showOutcome: parseBooleanEnv("DISCORD_GAINZ_SHOW_OUTCOME", true),
+    };
+
+    console.log(`📋 Discord gainz alert field configuration:`);
+    console.log(`   - Show Market: ${this.gainzAlertConfig.showMarket}`);
+    console.log(`   - Show Trader: ${this.gainzAlertConfig.showTrader}`);
+    console.log(`   - Show Profit %: ${this.gainzAlertConfig.showProfitPercent}`);
+    console.log(`   - Show Realized PnL: ${this.gainzAlertConfig.showRealizedPnl}`);
+    console.log(`   - Show Position Value: ${this.gainzAlertConfig.showPositionValue}`);
+    console.log(`   - Show When: ${this.gainzAlertConfig.showWhen}`);
+    console.log(`   - Show Category: ${this.gainzAlertConfig.showCategory}`);
+    console.log(`   - Show Thumbnail: ${this.gainzAlertConfig.showThumbnail}`);
+    console.log(`   - Show Footer: ${this.gainzAlertConfig.showFooter}`);
+    console.log(`   - Show Timestamp: ${this.gainzAlertConfig.showTimestamp}`);
+    console.log(`   - Show Entry Price: ${this.gainzAlertConfig.showEntryPrice}`);
+    console.log(`   - Show Exit Price: ${this.gainzAlertConfig.showExitPrice}`);
+    console.log(`   - Show Outcome: ${this.gainzAlertConfig.showOutcome}`);
     
     // Count configured channels
     const channelCount = Object.values(this.channels).filter(c => c).length;
@@ -54,6 +241,7 @@ class DiscordService {
       console.log(`   - Politics: ${this.channels.politics ? `YES (${this.channels.politics})` : "not configured"}`);
       console.log(`   - Economic: ${this.channels.economic ? `YES (${this.channels.economic})` : "not configured"}`);
       console.log(`   - Whale: ${this.channels.whale ? `YES (${this.channels.whale})` : "not configured"}`);
+      console.log(`   - Gainz: ${this.channels.gainz ? `YES (${this.channels.gainz})` : "not configured"}`);
     } else {
       console.warn(`⚠️  No Discord channels configured!`);
     }
@@ -69,13 +257,27 @@ class DiscordService {
   }
 
   /**
-   * Get channel ID(s) based on whale category and trade category
+   * Get channel ID(s) based on subscription type, whale category, and trade category
+   * Priority: subscriptionType (free -> free channel) > whale category > trade category
    */
-  private getChannelIds(whaleCategory: string, tradeCategory?: string): string[] {
+  private getChannelIds(whaleCategory: string, tradeCategory?: string, subscriptionType?: string): string[] {
     const channelIds: string[] = [];
     const whaleCatLower = whaleCategory.toLowerCase();
+    const subTypeLower = subscriptionType?.toLowerCase();
     
-    // If whale is "whale", always use whale channel
+    // Priority 1: If subscription type is "free", route to free channel (ignore categories)
+    if (subTypeLower === "free") {
+      if (this.channels.free) {
+        channelIds.push(this.channels.free);
+        console.log(`🎯 Routing to FREE channel (subscriptionType: ${subscriptionType}, ignoring trade category)`);
+        return channelIds;
+      } else {
+        console.log(`⚠️  FREE subscription type detected but no free channel configured. Falling back to default/category routing.`);
+        // Fall through to default routing if free channel not configured
+      }
+    }
+    
+    // Priority 2: If whale is "whale", always use whale channel (only if not free subscription)
     if (whaleCatLower === "whale") {
       if (this.channels.whale) {
         channelIds.push(this.channels.whale);
@@ -93,8 +295,9 @@ class DiscordService {
       }
     }
     
-    // If whale is "regular", route based on trade category
-    if (whaleCatLower === "regular" && tradeCategory) {
+    // Priority 3: If whale is "regular" and subscription is "paid", route based on trade category
+    // (If subscription is "free", it would have been caught above)
+    if (whaleCatLower === "regular" && tradeCategory && subTypeLower !== "free") {
       const tradeCatLower = tradeCategory.toLowerCase();
       console.log(`🔍 Routing check: whaleCategory="${whaleCategory}", tradeCategory="${tradeCategory}" (lowercase: "${tradeCatLower}")`);
       
@@ -211,15 +414,25 @@ class DiscordService {
     percentPnl?: number; // Percentage PnL from position
     whaleCategory?: string; // "regular" or "whale"
     tradeCategory?: string; // e.g., "sport", "crypto", "politics"
+    subscriptionType?: string; // "free" or "paid"
   }): Promise<string | null> {
     if (!this.isReady) {
       console.warn("⚠️  Discord bot not ready");
       return null;
     }
 
-    // Get channel IDs based on whale and trade categories
+    // Get channel IDs based on subscription type, whale category, and trade category
     const whaleCategory = data.whaleCategory || "regular";
     const tradeCategory = data.tradeCategory;
+    const subscriptionType = data.subscriptionType;
+
+    // Check if alert should be sent for this status
+    if (!this.shouldSendAlertForStatus(whaleCategory, data.status)) {
+      console.log(
+        `⏭️  Skipping Discord alert (status "${data.status}" disabled for ${whaleCategory} traders) | Whale: ${data.traderName || data.walletAddress}`
+      );
+      return null;
+    }
     
     // Debug logging
     console.log(
@@ -231,7 +444,7 @@ class DiscordService {
       `📋 Available channels: default=${this.channels.default ? 'YES' : 'NO'}, politics=${this.channels.politics ? 'YES' : 'NO'}, crypto=${this.channels.crypto ? 'YES' : 'NO'}, sport=${(this.channels.sport || this.channels.sports) ? 'YES' : 'NO'}, economic=${this.channels.economic ? 'YES' : 'NO'}`
     );
     
-    const channelIds = this.getChannelIds(whaleCategory, tradeCategory);
+    const channelIds = this.getChannelIds(whaleCategory, tradeCategory, subscriptionType);
 
     if (channelIds.length === 0) {
       console.warn(`⚠️  No channel configured for whale category "${whaleCategory}" and trade category "${tradeCategory || 'N/A'}"`);
@@ -239,7 +452,7 @@ class DiscordService {
     }
 
     console.log(
-      `📢 Routing Discord message | Whale: ${data.traderName || data.walletAddress} | Whale Category: ${whaleCategory} | Trade Category: ${tradeCategory || 'N/A'} | Channel(s): ${channelIds.join(', ')}`
+      `📢 Routing Discord message | Whale: ${data.traderName || data.walletAddress} | Subscription: ${subscriptionType || 'N/A'} | Whale Category: ${whaleCategory} | Trade Category: ${tradeCategory || 'N/A'} | Channel(s): ${channelIds.join(', ')}`
     );
 
     // Build embed once (reused for all channels)
@@ -297,6 +510,40 @@ class DiscordService {
   }
 
   /**
+   * Get the appropriate message field configuration based on whale category
+   */
+  private getMessageFields(whaleCategory: string): MessageFieldConfig {
+    const categoryLower = (whaleCategory || "regular").toLowerCase();
+    return categoryLower === "whale" ? this.whaleMessageFields : this.messageFields;
+  }
+
+  /**
+   * Get the appropriate status alert configuration based on whale category
+   */
+  private getStatusAlerts(whaleCategory: string): StatusAlertConfig {
+    const categoryLower = (whaleCategory || "regular").toLowerCase();
+    return categoryLower === "whale" ? this.whaleStatusAlerts : this.statusAlerts;
+  }
+
+  /**
+   * Check if alert should be sent for the given status
+   * Made public so it can be called from trade-polling service before sending/replying
+   */
+  public shouldSendAlertForStatus(whaleCategory: string, status?: string): boolean {
+    if (!status) return true; // Default to sending if status is not provided
+    
+    const statusAlerts = this.getStatusAlerts(whaleCategory);
+    const statusLower = status.toLowerCase();
+    
+    if (statusLower === "added") return statusAlerts.sendForAdded;
+    if (statusLower === "open") return statusAlerts.sendForOpen;
+    if (statusLower === "closed") return statusAlerts.sendForClosed;
+    if (statusLower === "partially_closed") return statusAlerts.sendForPartiallyClosed;
+    
+    return true; // Default to sending for unknown statuses
+  }
+
+  /**
    * Build dynamic title based on whale category, trade category, status, and PnL
    */
   private buildAlertTitle(
@@ -307,38 +554,65 @@ class DiscordService {
     percentPnl?: number
   ): string {
     const whaleCatLower = whaleCategory.toLowerCase();
-    const statusUpper = status ? status.toUpperCase().replace('_', ' ') : "";
+    const statusLower = status ? status.toLowerCase() : "";
+    const categoryDisplay = this.formatCategoryName(tradeCategory) || "Trade";
     
-    // If whale category is "whale"
-    if (whaleCatLower === "whale") {
-      if (status === "closed" || status === "partially_closed") {
-        // Show PnL percentage (no USD value for closed/partially closed)
-        if (percentPnl !== undefined) {
-          const pnlSign = percentPnl >= 0 ? "+" : "";
-          return `🐋 Whale Position ${statusUpper} (${pnlSign}${Math.abs(percentPnl).toFixed(2)}%)`;
-        }
-        return `🐋 Whale Position ${statusUpper}`;
+    // New title structure: "Opening/Closing [Category] Position" for open/closed statuses
+    if (statusLower === "open") {
+      // For open status: "Opening Sports Position"
+      if (whaleCatLower === "whale") {
+        return `🐋 Opening Whale Position`;
       } else {
-        // Show USD value for open and added positions
-        const usdDisplay = usdValue ? `$${parseFloat(usdValue).toFixed(2)}` : "";
-        return `🐋 Whale Position ${statusUpper}${usdDisplay ? ` (${usdDisplay})` : ""}`;
+        return `Opening ${categoryDisplay} Position`;
+      }
+    } else if (statusLower === "closed") {
+      // For closed status: "Closing Sports Position (%pnl)" - only show %pnl for closed
+      const pnlDisplay = percentPnl !== undefined
+        ? ` (${percentPnl >= 0 ? "+" : ""}${percentPnl.toFixed(2)}%)`
+        : "";
+      
+      if (whaleCatLower === "whale") {
+        return `🐋 Closing Whale Position${pnlDisplay}`;
+      } else {
+        return `Closing ${categoryDisplay} Position${pnlDisplay}`;
       }
     } else {
-      // Regular category - show trade category
-      const categoryDisplay = this.formatCategoryName(tradeCategory) || "Trade";
+      // For other statuses (added, partially_closed): keep old format
+      const statusUpper = status ? status.toUpperCase().replace('_', ' ') : "";
       
-      if (status === "closed" || status === "partially_closed") {
-        // Show PnL percentage in brackets with Gained/Loss label
-        if (percentPnl !== undefined) {
-          const pnlSign = percentPnl >= 0 ? "+" : "";
-          const pnlLabel = percentPnl >= 0 ? "Gained" : "Loss";
-          return `${categoryDisplay} Position ${statusUpper} (${pnlSign}${Math.abs(percentPnl).toFixed(2)}% ${pnlLabel})`;
+      if (whaleCatLower === "whale") {
+        const whaleFields = this.whaleMessageFields;
+        if (status === "partially_closed") {
+          // Show PnL percentage for partially closed
+          if (percentPnl !== undefined) {
+            const pnlSign = percentPnl >= 0 ? "+" : "";
+            return `🐋 Whale Position ${statusUpper} (${pnlSign}${Math.abs(percentPnl).toFixed(2)}%)`;
+          }
+          return `🐋 Whale Position ${statusUpper}`;
+        } else {
+          // Show USD value for added positions (if enabled for whale category)
+          const usdDisplay = (whaleFields.showValueInTitle && usdValue) 
+            ? `$${parseFloat(usdValue).toFixed(2)}` 
+            : "";
+          return `🐋 Whale Position ${statusUpper}${usdDisplay ? ` (${usdDisplay})` : ""}`;
         }
-        return `${categoryDisplay} Position ${statusUpper}`;
       } else {
-        // For open and added positions, show USD value
-        const usdDisplay = usdValue ? `$${parseFloat(usdValue).toFixed(2)}` : "";
-        return `${categoryDisplay} Position ${statusUpper}${usdDisplay ? ` (${usdDisplay})` : ""}`;
+        // Regular category
+        if (status === "partially_closed") {
+          // Show PnL percentage for partially closed
+          if (percentPnl !== undefined) {
+            const pnlSign = percentPnl >= 0 ? "+" : "";
+            return `${categoryDisplay} Position ${statusUpper} (${pnlSign}${Math.abs(percentPnl).toFixed(2)}%)`;
+          }
+          return `${categoryDisplay} Position ${statusUpper}`;
+        } else {
+          // For added positions, show USD value (if enabled for regular category)
+          const regularFields = this.messageFields;
+          const usdDisplay = (regularFields.showValueInTitle && usdValue) 
+            ? `$${parseFloat(usdValue).toFixed(2)}` 
+            : "";
+          return `${categoryDisplay} Position ${statusUpper}${usdDisplay ? ` (${usdDisplay})` : ""}`;
+        }
       }
     }
   }
@@ -364,8 +638,14 @@ class DiscordService {
     percentPnl?: number;
     whaleCategory?: string;
     tradeCategory?: string;
+    subscriptionType?: string;
+    entryPrice?: string;
+    exitPrice?: string;
+    outcome?: string;
   }, whaleCategory: string = "regular"): EmbedBuilder {
-    // Determine embed color based on status (not buy/sell)
+    // Get the appropriate field configuration based on whale category
+    const fieldConfig = this.getMessageFields(whaleCategory);
+    // Determine embed color based on status and PnL
     let embedColor = 0x0099ff; // Default blue
     if (data.status) {
       const statusLower = data.status.toLowerCase();
@@ -376,7 +656,12 @@ class DiscordService {
       } else if (statusLower === "partially_closed") {
         embedColor = 0xff8c00; // Orange for partially closed
       } else if (statusLower === "closed") {
-        embedColor = 0xef4444; // Red for closed
+        // Dynamic color for closed positions: green if positive PnL, red if negative
+        if (data.percentPnl !== undefined) {
+          embedColor = data.percentPnl >= 0 ? 0x22c55e : 0xef4444; // Green for profit, red for loss
+        } else {
+          embedColor = 0xef4444; // Default red if no PnL data
+        }
       }
     }
 
@@ -393,8 +678,11 @@ class DiscordService {
         : (data.traderName || data.walletAddress);
     }
 
-    // Parse additional info for outcome and price
-    const { outcome, price } = this.parseAdditionalInfo(data.additionalInfo);
+    // Parse additional info for outcome and price (fallback if not provided directly)
+    const parsedInfo = this.parseAdditionalInfo(data.additionalInfo);
+    // Use outcome from data if available (for closed positions), otherwise from parsed info
+    const outcome = data.outcome || parsedInfo.outcome;
+    const price = parsedInfo.price;
 
     // Build dynamic title
     const title = this.buildAlertTitle(
@@ -432,11 +720,11 @@ class DiscordService {
       });
     }
 
-    // 3. When and Type on same horizontal line (with padding for spacing)
+    // 3. When and Type on same horizontal line (with padding for spacing) - conditional based on config
     const fields: Array<{ name: string; value: string; inline: boolean }> = [];
     const fieldPadding = "   "; // Extra spacing between inline fields
     
-    if (data.activityTimestamp) {
+    if (fieldConfig.showWhen && data.activityTimestamp) {
       // Use Discord's auto-updating timestamp format
       // This shows when the TRADE happened (activityTimestamp), NOT when the message was created
       const discordTimestamp = this.formatDiscordTimestamp(data.activityTimestamp);
@@ -447,68 +735,101 @@ class DiscordService {
       });
     }
 
-    fields.push({
-      name: "📊 Type",
-      value: `${fieldPadding}${data.activityType}`,
-      inline: true,
-    });
+    if (fieldConfig.showType) {
+      fields.push({
+        name: "📊 Type",
+        value: `${fieldPadding}${data.activityType}`,
+        inline: true,
+      });
+    }
 
-    // 4. Shares and Value on next line
-    if (data.shares || data.usdValue) {
-      if (data.shares) {
-        const sharesValue = parseFloat(data.shares).toFixed(2);
-        let sharesDisplay = sharesValue;
-        
-        // Add total shares based on status
-        if (data.status === "open" || data.status === "added" || data.status === "partially_closed" || data.status === "closed") {
-          // Show total shares from position for all statuses
-          // For closed positions, totalShares will be 0 to show no remaining shares
-          if (data.totalShares !== undefined && data.totalShares > 0) {
-            sharesDisplay = `${sharesValue} / ${data.totalShares.toFixed(2)} total`;
-          } else if (data.status === "closed" && data.totalShares === 0) {
-            // For fully closed positions, show only total shares (don't show / 0 total)
-            sharesDisplay = sharesValue;
+    // 4. Shares and Value on next line (conditional based on config for whale category)
+    if (fieldConfig.showShares && data.shares) {
+      const sharesValue = parseFloat(data.shares).toFixed(2);
+      let sharesDisplay = sharesValue;
+      
+      // Add total shares based on status (if enabled for whale category)
+      if (fieldConfig.showTotalShares && 
+          (data.status === "open" || data.status === "added" || data.status === "partially_closed" || data.status === "closed")) {
+        // Show total shares from position for all statuses
+        // For closed positions, totalShares will be 0 to show no remaining shares
+        if (data.totalShares !== undefined && data.totalShares > 0) {
+          sharesDisplay = `${sharesValue} / ${data.totalShares.toFixed(2)} total`;
+        } else if (data.status === "closed" && data.totalShares === 0) {
+          // For fully closed positions, show only current shares (don't show / 0 total)
+          sharesDisplay = sharesValue;
+        }
+      }
+      
+      fields.push({
+        name: "📈 Shares",
+        value: `${sharesDisplay}${fieldPadding}`,
+        inline: true,
+      });
+    }
+    
+    // Add USD Value field (if enabled for whale category)
+    if (fieldConfig.showUsdValue && data.usdValue) {
+      const usdValue = parseFloat(data.usdValue).toFixed(2);
+      fields.push({
+        name: "💰 Value",
+        value: `${fieldPadding}$${usdValue}`,
+        inline: true,
+      });
+    }
+
+    // 5. Price fields - Entry Price and Exit Price for closed positions, or single Price for others
+    const isClosed = data.status?.toLowerCase() === "closed";
+    const isPartiallyClosed = data.status?.toLowerCase() === "partially_closed";
+    
+    if (isClosed && data.entryPrice && data.exitPrice) {
+      // For closed positions: show Entry Price and Exit Price separately
+      if (fieldConfig.showEntryPrice && data.entryPrice) {
+        fields.push({
+          name: "🏷️ Entry Price",
+          value: `$${parseFloat(data.entryPrice).toFixed(2)}${fieldPadding}`,
+          inline: true,
+        });
+      }
+      
+      if (fieldConfig.showExitPrice && data.exitPrice) {
+        fields.push({
+          name: "🏷️ Exit Price",
+          value: `$${parseFloat(data.exitPrice).toFixed(2)}${fieldPadding}`,
+          inline: true,
+        });
+      }
+    } else {
+      // For non-closed positions: use the existing price logic
+      // Dynamic label based on status: "Entry Price" for open/added, "Exit Price" for partially_closed
+      if (fieldConfig.showPrice && price) {
+        let priceLabel = "🏷️ Price";
+        if (data.status) {
+          const statusLower = data.status.toLowerCase();
+          if (statusLower === "partially_closed") {
+            priceLabel = "🏷️ Exit Price";
+          } else if (statusLower === "open" || statusLower === "added") {
+            priceLabel = "🏷️ Entry Price";
           }
         }
-        
         fields.push({
-          name: "📈 Shares",
-          value: `${sharesDisplay}${fieldPadding}`,
-          inline: true,
-        });
-      }
-      
-      if (data.usdValue) {
-        const usdValue = parseFloat(data.usdValue).toFixed(2);
-        fields.push({
-          name: "💰 Value",
-          value: `${fieldPadding}$${usdValue}`,
+          name: priceLabel,
+          value: `$${price}${fieldPadding}`,
           inline: true,
         });
       }
     }
-
-    // 5. Outcome and Price on next line
-    if (outcome || price) {
-      if (outcome) {
-        fields.push({
-          name: "🎯 Outcome",
-          value: `${outcome}${fieldPadding}`,
-          inline: true,
-        });
-      }
-      
-      if (price) {
-        fields.push({
-          name: "🏷️ Price",
-          value: `${fieldPadding}$${price}`,
-          inline: true,
-        });
-      }
+    
+    if (fieldConfig.showOutcome && outcome) {
+      fields.push({
+        name: "🎯 Outcome",
+        value: `${fieldPadding}${outcome}`,
+        inline: true,
+      });
     }
 
-    // 6. Status and PnL if available (on same line)
-    if (data.status) {
+    // 6. Status and PnL if available (on same line) - conditional based on config
+    if (fieldConfig.showStatus && data.status) {
       const statusLower = data.status.toLowerCase();
       const statusEmoji = statusLower === "open" ? "✅" : 
                          statusLower === "added" ? "➕" :
@@ -521,7 +842,8 @@ class DiscordService {
       });
     }
 
-    if (data.realizedPnl) {
+    // Show Realized PnL only if enabled and available (for closed positions)
+    if (fieldConfig.showRealizedPnl && data.realizedPnl) {
       const pnlValue = parseFloat(data.realizedPnl).toFixed(2);
       const pnlEmoji = parseFloat(data.realizedPnl) >= 0 ? "📈" : "📉";
       fields.push({
@@ -620,6 +942,7 @@ class DiscordService {
     percentPnl?: number;
     whaleCategory?: string;
     tradeCategory?: string;
+    subscriptionType?: string;
   }): Promise<boolean> {
     if (!this.isReady) {
       console.warn("⚠️  Discord bot not ready");
@@ -629,9 +952,9 @@ class DiscordService {
     // Parse message IDs (can be single ID or JSON array)
     const messageIds = this.parseMessageIds(messageId);
     
-    // Get channel IDs based on categories (for logging)
+    // Get channel IDs based on subscription type, categories (for logging)
     const whaleCategory = data.whaleCategory || "regular";
-    const channelIds = this.getChannelIds(whaleCategory, data.tradeCategory);
+    const channelIds = this.getChannelIds(whaleCategory, data.tradeCategory, data.subscriptionType);
 
     if (channelIds.length === 0) {
       console.warn(`⚠️  No channel configured for update`);
@@ -695,7 +1018,13 @@ class DiscordService {
    * @param replyContent - The text content or embed to send as a reply
    * @returns The first reply message ID if successful, null otherwise
    */
-  async replyToMessage(messageId: string, replyContent: string | EmbedBuilder): Promise<string | null> {
+  async replyToMessage(
+    messageId: string, 
+    replyContent: string | EmbedBuilder,
+    whaleCategory?: string,
+    tradeCategory?: string,
+    subscriptionType?: string
+  ): Promise<string | null> {
     if (!this.isReady) {
       console.warn("⚠️  Discord bot not ready");
       return null;
@@ -704,23 +1033,33 @@ class DiscordService {
     // Parse message IDs (can be single ID or JSON array)
     const messageIds = this.parseMessageIds(messageId);
     
-    // Reply to messages in all channels
-    // Note: For replies, we need to know which channel(s) to reply in
-    // This should be passed as a parameter or determined from context
-    // For now, try all configured channels
-    const allChannelIds = [
-      this.channels.default,
-      this.channels.sport,
-      this.channels.crypto,
-      this.channels.politics,
-      this.channels.whale,
-    ].filter((id): id is string => !!id);
+    // Determine which channel(s) to reply in based on routing logic
+    // If routing info is provided, use it; otherwise fall back to trying all channels
+    let channelIdsToTry: string[];
+    if (whaleCategory !== undefined || subscriptionType !== undefined) {
+      channelIdsToTry = this.getChannelIds(
+        whaleCategory || "regular",
+        tradeCategory,
+        subscriptionType
+      );
+    } else {
+      // Fallback: try all configured channels if routing info not provided
+      channelIdsToTry = [
+        this.channels.free, // Include free channel
+        this.channels.default,
+        this.channels.sport,
+        this.channels.crypto,
+        this.channels.politics,
+        this.channels.whale,
+        this.channels.economic,
+      ].filter((id): id is string => !!id);
+    }
 
     const replyMessageIds: string[] = [];
     
     // Match message IDs with channels (by index if same count, otherwise try each ID in each channel)
-    for (let i = 0; i < Math.max(allChannelIds.length, messageIds.length); i++) {
-      const channelId = allChannelIds[i % allChannelIds.length];
+    for (let i = 0; i < Math.max(channelIdsToTry.length, messageIds.length); i++) {
+      const channelId = channelIdsToTry[i % channelIdsToTry.length];
       const msgId = messageIds[i % messageIds.length];
       
       if (!msgId || !channelId) continue;
@@ -760,6 +1099,187 @@ class DiscordService {
     
     // Return first reply message ID for backward compatibility
     return replyMessageIds[0] || null;
+  }
+
+  /**
+   * Send a gainz alert for high-profit closed positions
+   * Called when a position is closed with PnL >= threshold
+   */
+  async sendGainzAlert(data: {
+    walletAddress: string;
+    traderName?: string;
+    profileUrl?: string;
+    thumbnailUrl?: string;
+    marketLink?: string;
+    marketName?: string;
+    percentPnl: number;
+    realizedPnl?: string;
+    usdValue?: string;
+    activityTimestamp?: string | Date;
+    whaleCategory?: string;
+    tradeCategory?: string;
+    entryPrice?: string;
+    exitPrice?: string;
+    outcome?: string;
+  }): Promise<string | null> {
+    if (!this.isReady) {
+      console.warn("⚠️  Discord bot not ready");
+      return null;
+    }
+
+    if (!this.channels.gainz) {
+      // Silently skip if gainz channel not configured
+      return null;
+    }
+
+    // Only send if PnL meets or exceeds threshold
+    if (data.percentPnl < this.gainzThreshold) {
+      return null;
+    }
+
+    try {
+      const channel = await this.client.channels.fetch(this.channels.gainz);
+      
+      if (!channel || !(channel instanceof TextChannel)) {
+        console.error(`❌ Gainz channel ${this.channels.gainz} not found or not a text channel`);
+        return null;
+      }
+
+      // Build celebratory gainz embed
+      const embed = new EmbedBuilder()
+        .setColor(0x00ff00) // Bright green for gains
+        .setTitle(`🎉 BIG GAINS ALERT! 🎉`);
+
+      // Description with profit % (if enabled) - make it big and attractive
+      if (this.gainzAlertConfig.showProfitPercent) {
+        const profitPercent = data.percentPnl.toFixed(2);
+        const profitSign = data.percentPnl >= 0 ? "+" : "";
+        // Use larger, more prominent formatting with emojis
+        embed.setDescription(`# 🔥 **${profitSign}${profitPercent}%** 🔥\n\n💰 **HUGE PROFIT!** 💰`);
+      }
+
+      // Thumbnail (if enabled)
+      if (this.gainzAlertConfig.showThumbnail && data.thumbnailUrl) {
+        embed.setThumbnail(data.thumbnailUrl);
+      }
+
+      // Market info (if enabled)
+      if (this.gainzAlertConfig.showMarket && data.marketLink && data.marketName) {
+        embed.addFields({
+          name: "📊 Market",
+          value: `[${data.marketName}](${data.marketLink})`,
+          inline: false,
+        });
+      }
+
+      // Trader info (if enabled)
+      if (this.gainzAlertConfig.showTrader) {
+        const traderDisplay = data.profileUrl && data.traderName
+          ? `[${data.traderName}](${data.profileUrl})`
+          : (data.traderName || data.walletAddress);
+        
+        embed.addFields({
+          name: "👤 Trader",
+          value: traderDisplay,
+          inline: false,
+        });
+      }
+
+      // Add PnL details fields (conditional based on config)
+      const fields: Array<{ name: string; value: string; inline: boolean }> = [];
+      
+      // Note: Profit % is shown in description above, so we don't add it as a field
+      // If you want it as a field instead, disable description and add it here
+
+      // Realized PnL (if enabled)
+      if (this.gainzAlertConfig.showRealizedPnl && data.realizedPnl) {
+        const pnlValue = parseFloat(data.realizedPnl).toFixed(2);
+        fields.push({
+          name: "💵 Realized PnL",
+          value: `$${pnlValue}`,
+          inline: true,
+        });
+      }
+
+      // Position Value (if enabled)
+      if (this.gainzAlertConfig.showPositionValue && data.usdValue) {
+        const usdValue = parseFloat(data.usdValue).toFixed(2);
+        fields.push({
+          name: "💲 Position Value",
+          value: `$${usdValue}`,
+          inline: true,
+        });
+      }
+
+      // When/Closed (if enabled)
+      if (this.gainzAlertConfig.showWhen && data.activityTimestamp) {
+        const discordTimestamp = this.formatDiscordTimestamp(data.activityTimestamp);
+        fields.push({
+          name: "⏰ Closed",
+          value: discordTimestamp,
+          inline: true,
+        });
+      }
+
+      // Category (if enabled)
+      if (this.gainzAlertConfig.showCategory && data.tradeCategory) {
+        const categoryDisplay = this.formatCategoryName(data.tradeCategory);
+        fields.push({
+          name: "🏷️ Category",
+          value: categoryDisplay,
+          inline: true,
+        });
+      }
+
+      // Entry Price (if enabled)
+      if (this.gainzAlertConfig.showEntryPrice && data.entryPrice) {
+        fields.push({
+          name: "🏷️ Entry Price",
+          value: `$${parseFloat(data.entryPrice).toFixed(2)}`,
+          inline: true,
+        });
+      }
+
+      // Exit Price (if enabled)
+      if (this.gainzAlertConfig.showExitPrice && data.exitPrice) {
+        fields.push({
+          name: "🏷️ Exit Price",
+          value: `$${parseFloat(data.exitPrice).toFixed(2)}`,
+          inline: true,
+        });
+      }
+
+      // Outcome (if enabled)
+      if (this.gainzAlertConfig.showOutcome && data.outcome) {
+        fields.push({
+          name: "🎯 Outcome",
+          value: data.outcome,
+          inline: true,
+        });
+      }
+
+      // Add fields if any
+      if (fields.length > 0) {
+        embed.addFields(fields);
+      }
+
+      // Footer (if enabled)
+      if (this.gainzAlertConfig.showFooter) {
+        embed.setFooter({ text: "Polymarket Gains" });
+      }
+
+      // Timestamp (if enabled)
+      if (this.gainzAlertConfig.showTimestamp) {
+        embed.setTimestamp(new Date());
+      }
+
+      const sentMessage = await channel.send({ embeds: [embed] });
+      console.log(`🎉 Gainz alert sent to channel ${this.channels.gainz} | PnL: ${data.percentPnl.toFixed(2)}%`);
+      return sentMessage.id;
+    } catch (error) {
+      console.error(`❌ Failed to send gainz alert to channel ${this.channels.gainz}:`, error);
+      return null;
+    }
   }
 
   disconnect(): void {

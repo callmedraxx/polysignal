@@ -14,10 +14,76 @@ class TradePollingService {
   private readonly POLL_INTERVAL_MS = 5000; // 5 seconds (between 5-10 as requested)
   private readonly POSITION_POLL_INTERVAL_MS = 10000; // 10 seconds for position checks
   private readonly CLEANUP_INTERVAL_MS = 3600000; // 1 hour cleanup interval
-  private readonly MIN_USD_VALUE_FOR_STORAGE_REGULAR = 500; // Minimum USD value for regular traders
-  private readonly MIN_USD_VALUE_FOR_STORAGE_WHALE = 1000; // Minimum USD value for whale traders
+  
+  // Configurable USD value thresholds from environment variables
   private readonly MAX_PRICE_FOR_STORAGE = 0.95; // Maximum price to store in database
   private readonly MIN_USD_VALUE_FOR_DISCORD = 500; // Minimum USD value to send/update Discord messages
+  private readonly ALLOWED_MIN_USD_VALUES = [500, 1000, 2000, 3000, 4000, 5000]; // Fixed allowed values
+
+  constructor() {
+    // Log configuration
+    console.log(`💰 Trade storage thresholds: Using per-trader minUsdValue from database`);
+    console.log(`   - Allowed values: $${this.ALLOWED_MIN_USD_VALUES.join(", $")}`);
+    console.log(`   - Default for new traders: $500`);
+  }
+
+  /**
+   * Get the minimum USD value threshold for storage from trader's database record
+   * Falls back to 500 if not set or invalid
+   */
+  private getMinUsdValueForStorage(whale: TrackedWhale): number {
+    const minUsdValue = whale.minUsdValue || 500;
+    // Convert to number for comparison (handles decimal values from database like 4000.00)
+    const numericValue = Number(minUsdValue);
+    // Validate that the value is in the allowed list, fallback to 500 if not
+    if (this.ALLOWED_MIN_USD_VALUES.includes(numericValue)) {
+      return numericValue;
+    }
+    console.warn(`⚠️  Invalid minUsdValue ${minUsdValue} for trader ${whale.label || whale.walletAddress}, using default $500`);
+    return 500;
+  }
+
+  /**
+   * Send gainz alert for closed positions with high PnL
+   */
+  private async sendGainzAlertForActivity(
+    activity: WhaleActivity,
+    whale: TrackedWhale,
+    metadata: Record<string, any>
+  ): Promise<void> {
+    try {
+      // Only send for closed positions with percentPnl
+      // The threshold check is done inside sendGainzAlert
+      if (activity.status !== "closed" || !activity.percentPnl) {
+        return;
+      }
+
+      const profileUrl = `https://polymarket.com/profile/${whale.walletAddress}`;
+      const marketLink = metadata.slug
+        ? `https://polymarket.com/market/${metadata.slug}`
+        : undefined;
+
+      await discordService.sendGainzAlert({
+        walletAddress: whale.walletAddress,
+        traderName: whale.label,
+        profileUrl,
+        thumbnailUrl: metadata.icon,
+        marketLink,
+        marketName: metadata.market,
+        percentPnl: activity.percentPnl,
+        realizedPnl: activity.realizedPnl,
+        usdValue: metadata.usdValue,
+        activityTimestamp: activity.activityTimestamp,
+        whaleCategory: whale.category || "regular",
+        tradeCategory: activity.category,
+        entryPrice: metadata.price, // Entry price from original buy
+        exitPrice: metadata.exitPrice, // Exit price from closed position
+        outcome: metadata.realizedOutcome, // Realized outcome (actual game result)
+      });
+    } catch (error) {
+      console.warn(`⚠️  Failed to send gainz alert for activity ${activity.id}:`, error);
+    }
+  }
   private isPolling = false;
   private isCheckingPositions = false;
   private isCleaning = false;
@@ -146,8 +212,8 @@ class TradePollingService {
 
       if (remainingToMatch > 0) {
         // Not enough shares in our BUY history - fall back to avgPrice
-        // This happens when initial BUYs were < $500/$1000 and not tracked
-        console.log(`⚠️  FIFO PnL incomplete: ${remainingToMatch.toFixed(2)} of ${sharesSold.toFixed(2)} shares unmatched (likely bought < $500/$1000 threshold)`);
+        // This happens when initial BUYs were below threshold and not tracked
+        console.log(`⚠️  FIFO PnL incomplete: ${remainingToMatch.toFixed(2)} of ${sharesSold.toFixed(2)} shares unmatched (likely bought below storage threshold)`);
         return undefined;
       }
 
@@ -496,14 +562,32 @@ class TradePollingService {
           percentPnl: positionData.percentPnl, // PnL percentage
           whaleCategory: whale.category || "regular", // Pass whale category
           tradeCategory: activity.category || undefined, // Pass trade/market category
+          subscriptionType: whale.subscriptionType || "free", // Pass subscription type
         };
 
+        // Check if alert should be sent for this status before sending or replying
+        const whaleCategory = whale.category || "regular";
+        const shouldSend = discordService.shouldSendAlertForStatus(whaleCategory, activity.status);
+        
+        if (!shouldSend) {
+          console.log(
+            `⏭️  Skipping Discord notification (status "${activity.status}" disabled for ${whaleCategory} traders) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+          );
+          continue;
+        }
+        
         // If we found a matching trade, reply to it; otherwise send new message
         let messageId: string | null = null;
         if (matchingActivity && matchingActivity.discordMessageId) {
           // Reply to existing message
           const embed = discordService.buildWhaleAlertEmbed(alertData, whale.category || "regular");
-          messageId = await discordService.replyToMessage(matchingActivity.discordMessageId, embed);
+          messageId = await discordService.replyToMessage(
+            matchingActivity.discordMessageId, 
+            embed,
+            whale.category || "regular",
+            activity.category || undefined,
+            whale.subscriptionType || "free"
+          );
           
           if (messageId) {
             console.log(
@@ -699,7 +783,7 @@ class TradePollingService {
    * Check if a trade meets storage criteria
    * - SELL trades: no filtering
    * - Added BUY trades (with existing buy): no filtering
-   * - Initial BUY trades: filtering based on whale category ($500 for regular, $1000 for whale) and price <= $0.95
+   * - Initial BUY trades: filtering based on whale category (configurable via MIN_USD_VALUE_REGULAR and MIN_USD_VALUE_WHALE env vars) and price <= $0.95
    */
   private async shouldStoreTrade(
     trade: PolymarketTrade,
@@ -724,8 +808,7 @@ class TradePollingService {
     }
     
     // Initial BUY trade: apply filtering based on whale category
-    const isWhale = whale.category?.toLowerCase() === "whale";
-    const minUsdValue = isWhale ? this.MIN_USD_VALUE_FOR_STORAGE_WHALE : this.MIN_USD_VALUE_FOR_STORAGE_REGULAR;
+    const minUsdValue = this.getMinUsdValueForStorage(whale);
     
     // Check USD value threshold
     if (usdValue < minUsdValue) {
@@ -753,8 +836,7 @@ class TradePollingService {
       // Check if trade meets storage criteria
       if (!(await this.shouldStoreTrade(trade, whale))) {
         const usdValue = trade.size * trade.price;
-        const isWhale = whale.category?.toLowerCase() === "whale";
-        const minUsdValue = isWhale ? this.MIN_USD_VALUE_FOR_STORAGE_WHALE : this.MIN_USD_VALUE_FOR_STORAGE_REGULAR;
+        const minUsdValue = this.getMinUsdValueForStorage(whale);
         const reason = usdValue < minUsdValue 
           ? `USD value $${usdValue.toFixed(2)} < $${minUsdValue}`
           : `price $${trade.price.toFixed(2)} > $${this.MAX_PRICE_FOR_STORAGE}`;
@@ -998,11 +1080,64 @@ class TradePollingService {
             ? (closedPosition.realizedPnl / initialValue) * 100
             : undefined;
           
+          const wasNotClosed = activity.status !== "closed";
+          
+          // Check if this activity was already processed by checkFullyClosedPositions BEFORE we update metadata
+          // This prevents duplicate alerts for the same closed position
+          const activityMetadata = activity.metadata || {};
+          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined;
+          
+          // Calculate exit price using formula: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
+          const totalCost = closedPosition.totalBought * closedPosition.avgPrice;
+          const calculatedExitPrice = closedPosition.totalBought > 0 && closedPosition.realizedPnl !== undefined
+            ? (totalCost + closedPosition.realizedPnl) / closedPosition.totalBought
+            : closedPosition.curPrice; // Fallback to curPrice if calculation not possible
+          
+          // Determine realized outcome based on PNL sign
+          // If PNL is positive, trader won (use closedPosition.outcome)
+          // If PNL is negative, trader lost (use closedPosition.oppositeOutcome)
+          let realizedOutcome: string | undefined;
+          if (closedPosition.realizedPnl !== undefined) {
+            if (closedPosition.realizedPnl >= 0) {
+              realizedOutcome = closedPosition.outcome;
+            } else {
+              realizedOutcome = closedPosition.oppositeOutcome;
+            }
+          }
+          
+          // Update metadata with exit price and realized outcome (only if not already set)
+          if (!metadata.exitPrice) {
+            metadata.exitPrice = calculatedExitPrice;
+          }
+          if (!metadata.realizedOutcome && realizedOutcome) {
+            metadata.realizedOutcome = realizedOutcome;
+          }
+          
+          // Update activity metadata (only if not already set)
+          if (!activity.metadata) {
+            activity.metadata = {};
+          }
+          if (!activity.metadata.exitPrice) {
+            activity.metadata.exitPrice = calculatedExitPrice;
+          }
+          if (!activity.metadata.realizedOutcome && realizedOutcome) {
+            activity.metadata.realizedOutcome = realizedOutcome;
+          }
+          
           if (activity.status !== "closed" || activity.realizedPnl !== closedPosition.realizedPnl?.toString()) {
             activity.status = "closed";
             activity.realizedPnl = closedPosition.realizedPnl?.toString();
             activity.percentPnl = percentPnl ?? undefined;
             updated = true;
+          }
+          
+          // Note: Gainz alerts are sent from checkFullyClosedPositions to avoid duplicates
+          // Only send gainz alert here if this activity wasn't handled by checkFullyClosedPositions
+          // (i.e., if it was already closed before checkFullyClosedPositions ran)
+          // This prevents duplicate alerts for the same closed position
+          if (wasNotClosed && percentPnl !== undefined && !wasHandledByFullyClosedCheck) {
+            // Use updated metadata with exitPrice and realizedOutcome
+            await this.sendGainzAlertForActivity(activity, whale, metadata);
           }
         }
 
@@ -1128,13 +1263,28 @@ class TradePollingService {
                   percentPnl: positionData.percentPnl,
                   whaleCategory: whale.category || "regular",
                   tradeCategory: activity.category || undefined,
+                  subscriptionType: whale.subscriptionType || "free",
                 }, whale.category || "regular");
 
-                const replyMessageId = await discordService.replyToMessage(matchingActivity.discordMessageId, embed);
-                
-                if (replyMessageId) {
-                  activity.discordMessageId = replyMessageId;
-                  await this.activityRepository.save(activity);
+                // Check if alert should be sent for this status
+                const whaleCategoryForCheck = whale.category || "regular";
+                if (!discordService.shouldSendAlertForStatus(whaleCategoryForCheck, activity.status)) {
+                  console.log(
+                    `⏭️  Skipping Discord reply (status "${activity.status}" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                  );
+                } else {
+                  const replyMessageId = await discordService.replyToMessage(
+                    matchingActivity.discordMessageId, 
+                    embed,
+                    whale.category || "regular",
+                    activity.category || undefined,
+                    whale.subscriptionType || "free"
+                  );
+                  
+                  if (replyMessageId) {
+                    activity.discordMessageId = replyMessageId;
+                    await this.activityRepository.save(activity);
+                  }
                 }
               } else {
                 console.warn(
@@ -1361,11 +1511,64 @@ class TradePollingService {
             ? (closedPosition.realizedPnl / initialValue) * 100
             : undefined;
           
+          const wasNotClosed = activity.status !== "closed";
+          
+          // Check if this activity was already processed by checkFullyClosedPositions BEFORE we update metadata
+          // This prevents duplicate alerts for the same closed position
+          const activityMetadata = activity.metadata || {};
+          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined;
+          
+          // Calculate exit price using formula: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
+          const totalCost = closedPosition.totalBought * closedPosition.avgPrice;
+          const calculatedExitPrice = closedPosition.totalBought > 0 && closedPosition.realizedPnl !== undefined
+            ? (totalCost + closedPosition.realizedPnl) / closedPosition.totalBought
+            : closedPosition.curPrice; // Fallback to curPrice if calculation not possible
+          
+          // Determine realized outcome based on PNL sign
+          // If PNL is positive, trader won (use closedPosition.outcome)
+          // If PNL is negative, trader lost (use closedPosition.oppositeOutcome)
+          let realizedOutcome: string | undefined;
+          if (closedPosition.realizedPnl !== undefined) {
+            if (closedPosition.realizedPnl >= 0) {
+              realizedOutcome = closedPosition.outcome;
+            } else {
+              realizedOutcome = closedPosition.oppositeOutcome;
+            }
+          }
+          
+          // Update metadata with exit price and realized outcome (only if not already set)
+          if (!metadata.exitPrice) {
+            metadata.exitPrice = calculatedExitPrice;
+          }
+          if (!metadata.realizedOutcome && realizedOutcome) {
+            metadata.realizedOutcome = realizedOutcome;
+          }
+          
+          // Update activity metadata (only if not already set)
+          if (!activity.metadata) {
+            activity.metadata = {};
+          }
+          if (!activity.metadata.exitPrice) {
+            activity.metadata.exitPrice = calculatedExitPrice;
+          }
+          if (!activity.metadata.realizedOutcome && realizedOutcome) {
+            activity.metadata.realizedOutcome = realizedOutcome;
+          }
+          
           if (activity.status !== "closed" || activity.realizedPnl !== closedPosition.realizedPnl?.toString()) {
             activity.status = "closed";
             activity.realizedPnl = closedPosition.realizedPnl?.toString();
             activity.percentPnl = percentPnl ?? undefined;
             updated = true;
+          }
+          
+          // Note: Gainz alerts are sent from checkFullyClosedPositions to avoid duplicates
+          // Only send gainz alert here if this activity wasn't handled by checkFullyClosedPositions
+          // (i.e., if it was already closed before checkFullyClosedPositions ran)
+          // This prevents duplicate alerts for the same closed position
+          if (wasNotClosed && percentPnl !== undefined && !wasHandledByFullyClosedCheck) {
+            // Use updated metadata with exitPrice and realizedOutcome
+            await this.sendGainzAlertForActivity(activity, whale, metadata);
           }
         }
 
@@ -1491,13 +1694,28 @@ class TradePollingService {
                   percentPnl: positionData.percentPnl,
                   whaleCategory: whale.category || "regular",
                   tradeCategory: activity.category || undefined,
+                  subscriptionType: whale.subscriptionType || "free",
                 }, whale.category || "regular");
 
-                const replyMessageId = await discordService.replyToMessage(matchingActivity.discordMessageId, embed);
-                
-                if (replyMessageId) {
-                  activity.discordMessageId = replyMessageId;
-                  await this.activityRepository.save(activity);
+                // Check if alert should be sent for this status
+                const whaleCategoryForCheck = whale.category || "regular";
+                if (!discordService.shouldSendAlertForStatus(whaleCategoryForCheck, activity.status)) {
+                  console.log(
+                    `⏭️  Skipping Discord reply (status "${activity.status}" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                  );
+                } else {
+                  const replyMessageId = await discordService.replyToMessage(
+                    matchingActivity.discordMessageId, 
+                    embed,
+                    whale.category || "regular",
+                    activity.category || undefined,
+                    whale.subscriptionType || "free"
+                  );
+                  
+                  if (replyMessageId) {
+                    activity.discordMessageId = replyMessageId;
+                    await this.activityRepository.save(activity);
+                  }
                 }
               } else {
                 console.warn(
@@ -1592,119 +1810,176 @@ class TradePollingService {
 
       console.log(`   Found ${openBuyTrades.length} open BUY trade(s) for ${whale.label || whale.walletAddress}`);
 
-      // Get unique conditionId and outcomeIndex combinations
+      // Normalize conditionIds for consistent comparison
+      const normalizeConditionId = (id: string | undefined): string => {
+        if (!id) return "";
+        return id.toLowerCase().trim();
+      };
+
+      // Get unique trades by conditionId only (since we match by conditionId only)
       const uniqueTrades = new Map<string, WhaleActivity>();
       for (const trade of openBuyTrades) {
         const conditionId = trade.metadata?.conditionId;
-        const outcomeIndex = trade.metadata?.outcomeIndex;
-        if (conditionId !== undefined && outcomeIndex !== undefined) {
-          const key = `${conditionId}:${outcomeIndex}`;
-          // Keep the oldest open BUY trade for each unique conditionId:outcomeIndex
-          if (!uniqueTrades.has(key)) {
-            uniqueTrades.set(key, trade);
+        if (conditionId !== undefined) {
+          // Use normalized conditionId as key (no outcomeIndex in key)
+          const normalizedConditionId = normalizeConditionId(conditionId);
+          // Keep the oldest open BUY trade for each unique conditionId
+          if (!uniqueTrades.has(normalizedConditionId)) {
+            uniqueTrades.set(normalizedConditionId, trade);
           }
         }
       }
 
-      console.log(`   Checking ${uniqueTrades.size} unique conditionId:outcomeIndex combination(s)`);
+      console.log(`   Checking ${uniqueTrades.size} unique conditionId(s)`);
 
       if (uniqueTrades.size === 0) {
         return;
       }
 
-      // Fetch ALL closed positions with pagination to ensure we don't miss any
-      // Don't filter by conditionIds here - we'll match on conditionId:outcomeIndex later
-      const closedPositions: any[] = [];
-      const LIMIT = 500;
-      let offset = 0;
-      let hasMore = true;
+      // Extract conditionIds from open trades to filter the API query
+      // This is more efficient and ensures we get the exact positions we need
+      const conditionIdsToCheck = Array.from(uniqueTrades.values())
+        .map(trade => trade.metadata?.conditionId)
+        .filter((id): id is string => id !== undefined && id !== null);
 
-      while (hasMore) {
-        console.log(`   Fetching closed positions (offset: ${offset}, limit: ${LIMIT})...`);
-        
-        const batch = await polymarketService.getUserClosedPositions(
-          whale.walletAddress,
-          undefined, // Don't filter by conditionIds - fetch ALL closed positions
-          offset,
-          LIMIT
-        );
-
-        if (batch.length === 0) {
-          hasMore = false;
-        } else {
-          closedPositions.push(...batch);
-          console.log(`   Fetched ${batch.length} closed position(s) in this batch (total: ${closedPositions.length})`);
-          
-          // If we got fewer results than requested, we've reached the end
-          if (batch.length < LIMIT) {
-            hasMore = false;
-          } else {
-            offset += LIMIT;
-          }
-        }
-      }
-
-      console.log(`   Fetched ${closedPositions.length} total closed position(s) from API`);
-
-      // Create a map of closed positions for quick lookup
-      const closedPositionMap = new Map<string, any>(
-        closedPositions.map(p => [`${p.conditionId}:${p.outcomeIndex}`, p])
+      // Fetch closed positions filtered by conditionIds (more efficient than fetching all)
+      // When filtering by market, we don't need pagination since we're querying specific markets
+      const closedPositions = await polymarketService.getUserClosedPositions(
+        whale.walletAddress,
+        conditionIdsToCheck, // Filter by conditionIds from open trades
+        undefined, // No offset needed when filtering by specific markets
+        undefined, // Use default limit (500)
+        "REALIZEDPNL", // Sort by realized PnL (matches user's successful query)
+        "DESC" // Descending order
       );
 
+      // Create a map of closed positions by conditionId, then by asset
+      // This handles cases where a trader trades both sides of a market (Yes/No, Up/Down)
+      // Structure: Map<conditionId, Map<asset, closedPosition>>
+      const closedPositionMap = new Map<string, Map<string, any>>();
+      
+      for (const p of closedPositions) {
+        const normalizedConditionId = normalizeConditionId(p.conditionId);
+        const asset = p.asset; // Asset is unique per outcome in a market
+        
+        if (!closedPositionMap.has(normalizedConditionId)) {
+          closedPositionMap.set(normalizedConditionId, new Map());
+        }
+        closedPositionMap.get(normalizedConditionId)!.set(asset, p);
+      }
+
       // Check each unique open BUY trade against closed positions
+      // Match by both conditionId AND asset to correctly identify which closed position
       for (const [key, openBuyTrade] of uniqueTrades.entries()) {
-        const closedPosition = closedPositionMap.get(key);
+        const conditionId = openBuyTrade.metadata?.conditionId;
+        const asset = openBuyTrade.metadata?.asset;
+        
+        if (!conditionId || !asset) continue;
+        
+        const normalizedConditionId = normalizeConditionId(conditionId);
+        const closedPositionsForMarket = closedPositionMap.get(normalizedConditionId);
+        
+        if (!closedPositionsForMarket) continue;
+        
+        // Match by asset to find the specific closed position for this trade
+        const closedPosition = closedPositionsForMarket.get(asset);
         
         if (closedPosition) {
-          console.log(`   ✅ Found closed position match for ${whale.label || whale.walletAddress} | ConditionId: ${openBuyTrade.metadata?.conditionId} | OutcomeIndex: ${openBuyTrade.metadata?.outcomeIndex}`);
+          console.log(`   ✅ Found closed position match for ${whale.label || whale.walletAddress} | ConditionId: ${conditionId} | Asset: ${asset.substring(0, 20)}...`);
+          
+          // Always use realizedPnl from closed position API (it's accurate)
+          const realizedPnl = closedPosition.realizedPnl;
           
           // Calculate percentage PnL from closed position
           const initialValue = closedPosition.totalBought * closedPosition.avgPrice;
-          const percentPnl = initialValue > 0 && closedPosition.realizedPnl !== undefined
-            ? (closedPosition.realizedPnl / initialValue) * 100
+          const percentPnl = initialValue > 0 && realizedPnl !== undefined
+            ? (realizedPnl / initialValue) * 100
             : undefined;
+
+          // Determine realized outcome based on PNL sign
+          // If PNL is positive, trader won (use closedPosition.outcome)
+          // If PNL is negative, trader lost (use closedPosition.oppositeOutcome)
+          let realizedOutcome: string;
+          let realizedOutcomeIndex: number;
+          
+          if (realizedPnl !== undefined && realizedPnl >= 0) {
+            // Positive PNL: trader's outcome won
+            realizedOutcome = closedPosition.outcome;
+            realizedOutcomeIndex = closedPosition.outcomeIndex;
+          } else {
+            // Negative PNL: trader's outcome lost, opposite outcome won
+            realizedOutcome = closedPosition.oppositeOutcome;
+            // Flip the outcome index (0 -> 1, 1 -> 0)
+            realizedOutcomeIndex = closedPosition.outcomeIndex === 0 ? 1 : 0;
+          }
 
           // Build alert data for the closed position
-          const metadata = openBuyTrade.metadata || {};
+          const tradeMetadata = openBuyTrade.metadata || {};
           const profileUrl = `https://polymarket.com/profile/${whale.walletAddress}`;
-          const marketLink = metadata.slug
-            ? `https://polymarket.com/market/${metadata.slug}`
+          const marketLink = tradeMetadata.slug
+            ? `https://polymarket.com/market/${tradeMetadata.slug}`
             : undefined;
 
+          // Calculate exit price using formula: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
+          // Total Cost = avgPrice × totalBought
+          const totalCost = closedPosition.totalBought * closedPosition.avgPrice;
+          const calculatedExitPrice = closedPosition.totalBought > 0 && realizedPnl !== undefined
+            ? (totalCost + realizedPnl) / closedPosition.totalBought
+            : closedPosition.curPrice; // Fallback to curPrice if calculation not possible
+          const exitPrice = calculatedExitPrice.toString();
+          
           const alertData = {
             walletAddress: whale.walletAddress,
             traderName: whale.label,
             profileUrl,
-            thumbnailUrl: metadata.icon,
+            thumbnailUrl: tradeMetadata.icon,
             marketLink,
-            marketName: metadata.market,
+            marketName: tradeMetadata.market,
             activityType: 'SELL',
-            shares: closedPosition.totalBought.toString(), // Show total shares from closed position
+            shares: closedPosition.totalBought.toString(), // Use totalBought from closed position
             totalShares: 0, // Fully closed = 0 remaining shares
             totalBought: closedPosition.totalBought,
-            usdValue: metadata.usdValue,
+            usdValue: tradeMetadata.usdValue,
             activityTimestamp: openBuyTrade.activityTimestamp,
             transactionHash: openBuyTrade.transactionHash,
             blockchain: "Polygon",
-            additionalInfo: `Outcome: ${metadata.outcome}\nPrice: $${parseFloat(metadata.price || '0').toFixed(2)}`,
+            additionalInfo: `Outcome: ${realizedOutcome}\nPrice: $${parseFloat(tradeMetadata.price || '0').toFixed(2)}`, // Keep for backward compatibility
             status: 'closed',
-            realizedPnl: closedPosition.realizedPnl?.toString(),
+            realizedPnl: realizedPnl?.toString(), // Always use from closed position API
             percentPnl,
             whaleCategory: whale.category || "regular",
             tradeCategory: openBuyTrade.category || undefined,
+            subscriptionType: whale.subscriptionType || "free",
+            entryPrice: tradeMetadata.price, // Entry price from original buy
+            exitPrice: exitPrice, // Calculated using: (Total Cost + Realized PnL) / Total Bought
+            outcome: realizedOutcome, // Use realized outcome based on PNL sign (shows actual game result)
           };
 
           // Reply to Discord message before updating database (to prevent race conditions)
           if (openBuyTrade.discordMessageId) {
             console.log(`   💬 Replying to Discord message for closed position | Original: ${openBuyTrade.discordMessageId}`);
             
-            const embed = discordService.buildWhaleAlertEmbed(alertData, whale.category || "regular");
-            const replyMessageId = await discordService.replyToMessage(openBuyTrade.discordMessageId, embed);
-            
-            if (replyMessageId) {
-              console.log(`   ✅ Discord reply sent successfully | Reply ID: ${replyMessageId}`);
+            // Check if alert should be sent for this status
+            const whaleCategoryForCheck = whale.category || "regular";
+            if (!discordService.shouldSendAlertForStatus(whaleCategoryForCheck, 'closed')) {
+              console.log(
+                `   ⏭️  Skipping Discord reply (status "closed" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress}`
+              );
             } else {
-              console.warn(`   ⚠️  Failed to send Discord reply`);
+              const embed = discordService.buildWhaleAlertEmbed(alertData, whale.category || "regular");
+              const replyMessageId = await discordService.replyToMessage(
+                openBuyTrade.discordMessageId, 
+                embed,
+                whale.category || "regular",
+                openBuyTrade.category || undefined,
+                whale.subscriptionType || "free"
+              );
+              
+              if (replyMessageId) {
+                console.log(`   ✅ Discord reply sent successfully | Reply ID: ${replyMessageId}`);
+              } else {
+                console.warn(`   ⚠️  Failed to send Discord reply`);
+              }
             }
           } else {
             console.warn(`   ⚠️  No Discord message ID found for open BUY trade ${openBuyTrade.id}`);
@@ -1712,8 +1987,22 @@ class TradePollingService {
 
           // Update the open BUY trade status to closed in database (after Discord reply)
           openBuyTrade.status = 'closed';
-          openBuyTrade.realizedPnl = closedPosition.realizedPnl?.toString();
+          openBuyTrade.realizedPnl = realizedPnl?.toString();
           openBuyTrade.percentPnl = percentPnl ?? undefined;
+          
+          // Update metadata with exit price and realized outcome (separate from original outcome)
+          // Exit price is calculated using: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
+          const updatedMetadata = openBuyTrade.metadata || {};
+          updatedMetadata.exitPrice = calculatedExitPrice; // Use calculated exit price (not curPrice)
+          // Store realized outcome separately (based on PNL) - don't overwrite original outcome
+          updatedMetadata.realizedOutcome = realizedOutcome; // The actual winning outcome (based on PNL sign)
+          updatedMetadata.realizedOutcomeIndex = realizedOutcomeIndex; // The index of the winning outcome
+          openBuyTrade.metadata = updatedMetadata;
+          
+          // Send gainz alert if this closed position has high PnL
+          if (percentPnl !== undefined) {
+            await this.sendGainzAlertForActivity(openBuyTrade, whale, updatedMetadata);
+          }
           await this.activityRepository.save(openBuyTrade);
           
           console.log(`   ✅ Updated open BUY trade status to closed in database | Activity: ${openBuyTrade.id}`);
@@ -1740,7 +2029,7 @@ class TradePollingService {
 
   /**
    * Cleanup database by removing activities that don't meet storage criteria
-   * Removes activities where USD value < $500 OR price > $0.95
+   * Removes activities where USD value < threshold (based on whale category) OR price > $0.95
    */
   private async cleanupDatabase(): Promise<void> {
     if (this.isCleaning) {
@@ -1768,8 +2057,11 @@ class TradePollingService {
         const price = metadata.price ? parseFloat(metadata.price) : null;
 
         // Determine whale category to apply appropriate threshold
-        const isWhale = activity.whale?.category?.toLowerCase() === "whale";
-        const minUsdValue = isWhale ? this.MIN_USD_VALUE_FOR_STORAGE_WHALE : this.MIN_USD_VALUE_FOR_STORAGE_REGULAR;
+        if (!activity.whale) {
+          console.warn(`⚠️  Activity ${activity.id} has no whale relation, skipping cleanup check`);
+          continue;
+        }
+        const minUsdValue = this.getMinUsdValueForStorage(activity.whale);
         
         // Check if activity should be removed based on side and status
         // SELL and added BUY trades are not filtered

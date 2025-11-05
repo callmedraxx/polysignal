@@ -126,6 +126,18 @@ router.get("/:id", async (req: Request, res: Response) => {
  *                 description: Category/type of whale (e.g., "regular", "whale", "mega_whale")
  *                 default: "regular"
  *                 example: "whale"
+ *               subscriptionType:
+ *                 type: string
+ *                 description: Subscription type (e.g., "free", "paid")
+ *                 enum: ["free", "paid"]
+ *                 default: "free"
+ *                 example: "paid"
+ *               minUsdValue:
+ *                 type: number
+ *                 description: Minimum USD value threshold for storing initial BUY trades
+ *                 enum: [500, 1000, 2000, 3000, 4000, 5000]
+ *                 default: 500
+ *                 example: 1000
  *               description:
  *                 type: string
  *                 description: Optional description of the whale
@@ -147,7 +159,7 @@ router.get("/:id", async (req: Request, res: Response) => {
  */
 router.post("/", async (req: Request, res: Response) => {
   try {
-    const { walletAddress, label, category, description, isActive } = req.body;
+    const { walletAddress, label, category, subscriptionType, description, isActive, minUsdValue } = req.body;
     
     if (!walletAddress) {
       res.status(400).json({ error: "walletAddress is required" });
@@ -159,11 +171,35 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
     
+    // Validate minUsdValue if provided
+    const ALLOWED_MIN_USD_VALUES = [500, 1000, 2000, 3000, 4000, 5000];
+    if (minUsdValue !== undefined) {
+      if (!ALLOWED_MIN_USD_VALUES.includes(minUsdValue)) {
+        res.status(400).json({ 
+          error: `minUsdValue must be one of: ${ALLOWED_MIN_USD_VALUES.join(", ")}` 
+        });
+        return;
+      }
+    }
+    
+    // Validate subscriptionType if provided
+    const ALLOWED_SUBSCRIPTION_TYPES = ["free", "paid"];
+    if (subscriptionType !== undefined) {
+      if (!ALLOWED_SUBSCRIPTION_TYPES.includes(subscriptionType)) {
+        res.status(400).json({ 
+          error: `subscriptionType must be one of: ${ALLOWED_SUBSCRIPTION_TYPES.join(", ")}` 
+        });
+        return;
+      }
+    }
+    
     const whale = whaleRepository.create({
       walletAddress,
       label,
       category: category || "regular", // Default to "regular" if not specified
+      subscriptionType: subscriptionType || "free", // Default to "free" if not specified
       description,
+      minUsdValue: minUsdValue || 500, // Default to 500 if not specified
       isActive: isActive !== undefined ? isActive : true,
     });
     
@@ -205,6 +241,16 @@ router.post("/", async (req: Request, res: Response) => {
  *               category:
  *                 type: string
  *                 description: Category/type of whale (e.g., "regular", "whale", "mega_whale")
+ *               subscriptionType:
+ *                 type: string
+ *                 description: Subscription type (e.g., "free", "paid")
+ *                 enum: ["free", "paid"]
+ *                 example: "paid"
+ *               minUsdValue:
+ *                 type: number
+ *                 description: Minimum USD value threshold for storing initial BUY trades
+ *                 enum: [500, 1000, 2000, 3000, 4000, 5000]
+ *                 example: 1000
  *               isActive:
  *                 type: boolean
  *               metadata:
@@ -226,7 +272,31 @@ router.put("/:id", async (req: Request, res: Response) => {
       return;
     }
     
-    const { label, description, category, isActive, metadata } = req.body;
+    const { label, description, category, subscriptionType, isActive, metadata, minUsdValue } = req.body;
+    
+    // Validate minUsdValue if provided
+    const ALLOWED_MIN_USD_VALUES = [500, 1000, 2000, 3000, 4000, 5000];
+    if (minUsdValue !== undefined) {
+      if (!ALLOWED_MIN_USD_VALUES.includes(minUsdValue)) {
+        res.status(400).json({ 
+          error: `minUsdValue must be one of: ${ALLOWED_MIN_USD_VALUES.join(", ")}` 
+        });
+        return;
+      }
+      whale.minUsdValue = minUsdValue;
+    }
+    
+    // Validate subscriptionType if provided
+    const ALLOWED_SUBSCRIPTION_TYPES = ["free", "paid"];
+    if (subscriptionType !== undefined) {
+      if (!ALLOWED_SUBSCRIPTION_TYPES.includes(subscriptionType)) {
+        res.status(400).json({ 
+          error: `subscriptionType must be one of: ${ALLOWED_SUBSCRIPTION_TYPES.join(", ")}` 
+        });
+        return;
+      }
+      whale.subscriptionType = subscriptionType;
+    }
     
     if (label !== undefined) whale.label = label;
     if (description !== undefined) whale.description = description;
