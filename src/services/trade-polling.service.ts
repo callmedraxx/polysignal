@@ -1619,6 +1619,7 @@ class TradePollingService {
 
       // Create copytrade position if whale is in copytrade and this is an initial BUY trade (status = "open")
       // Skip "added" buys - they don't create separate positions
+      // Skip "partially_closed" SELL trades - only copy trade fully closed positions
       if (whale.isCopytrade) {
         if (trade.side === "BUY" && status === "open") {
           console.log(
@@ -1626,7 +1627,8 @@ class TradePollingService {
             `Market: ${trade.title} | Price: $${trade.price}`
           );
           await this.createCopytradePosition(whale, savedActivity, trade, status);
-        } else if (trade.side === "SELL" && status) {
+        } else if (trade.side === "SELL" && status === "closed") {
+          // Only process fully closed SELL trades, skip partially_closed
           console.log(
             `📊 CopyTrade: Processing SELL trade for ${whale.label || whale.walletAddress} | ` +
             `Status: ${status} | Market: ${trade.title} | Price: $${trade.price}`
