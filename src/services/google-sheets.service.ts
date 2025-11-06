@@ -841,9 +841,9 @@ class GoogleSheetsService {
               data.exitPrice ? parseFloat(data.exitPrice.toString()).toFixed(4) : "",
               data.sharesSold ? parseFloat(data.sharesSold.toString()).toFixed(2) : "",
               data.realizedPnl ? parseFloat(data.realizedPnl.toString()).toFixed(2) : "",
-              data.percentPnl !== undefined ? `${data.percentPnl.toFixed(2)}%` : "",
+              "", // Column P: Percent PnL - will be calculated by formula
               data.finalValue ? parseFloat(data.finalValue.toString()).toFixed(2) : "",
-              data.percentPnl !== undefined ? `${data.percentPnl.toFixed(2)}%` : "",
+              "", // Column R: ROI - will be calculated by formula
               data.status,
               data.hoursHeld ? data.hoursHeld.toFixed(2) : "",
               pos.positionGroupId,
@@ -896,10 +896,10 @@ class GoogleSheetsService {
               values: [[`=IF(OR(ISBLANK(M${row}), ISBLANK(H${row}), ISBLANK(N${row})), "", (M${row} - H${row}) * N${row})`]],
             });
 
-            // Percent PnL formula (Column P) = (Realized PnL (O) / Simulated Investment (I)) * 100
+            // Percent PnL formula (Column P) = (Realized PnL (O) / Cost Basis) * 100, where Cost Basis = Entry Price (H) * Shares Sold (N)
             formulaRequests.push({
               range: `${sheetName}!P${row}`,
-              values: [[`=IF(OR(ISBLANK(O${row}), ISBLANK(I${row})), "", (O${row} / I${row}) * 100)`]],
+              values: [[`=IF(OR(ISBLANK(O${row}), ISBLANK(H${row}), ISBLANK(N${row})), "", IF((H${row} * N${row}) = 0, "", (O${row} / (H${row} * N${row})) * 100))`]],
             });
 
             // Final Value formula (Column Q) = Simulated Investment (I) + Realized PnL (O)
@@ -1063,24 +1063,9 @@ class GoogleSheetsService {
         });
       }
 
-      if (data.percentPnl !== undefined && data.percentPnl !== null) {
-        // Ensure percentPnl is a number
-        const percentPnlNum = typeof data.percentPnl === 'number' 
-          ? data.percentPnl 
-          : parseFloat(String(data.percentPnl));
-        
-        if (!isNaN(percentPnlNum)) {
-          updates.push({
-            range: `${sheetName}!P${rowIndex}`, // Column P: Percent PnL
-            values: [[`${percentPnlNum.toFixed(2)}%`]],
-          });
-          // Also update ROI (Column R)
-          updates.push({
-            range: `${sheetName}!R${rowIndex}`, // Column R: ROI (same as Percent PnL)
-            values: [[`${percentPnlNum.toFixed(2)}%`]],
-          });
-        }
-      }
+      // Note: We don't write percentPnl directly here because formulas will be set below
+      // Writing it as a value could cause issues if the cell is percentage-formatted
+      // The formulas in columns P and R will calculate the correct values
 
       if (data.finalValue !== undefined) {
         updates.push({
