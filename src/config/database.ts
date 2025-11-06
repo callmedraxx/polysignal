@@ -5,6 +5,7 @@ import { WhaleActivity } from "../entities/WhaleActivity.js";
 import { ArbitrageOpportunity } from "../entities/ArbitrageOpportunity.js";
 import { CopyTradeWallet } from "../entities/CopyTradeWallet.js";
 import { CopyTradePosition } from "../entities/CopyTradePosition.js";
+import { WhaleFrequencyTracking } from "../entities/WhaleFrequencyTracking.js";
 
 dotenv.config();
 
@@ -17,7 +18,7 @@ export const AppDataSource = new DataSource({
   database: process.env.DATABASE_NAME || "polysignal_db",
   synchronize: true, // Auto-sync only in development 
   logging: process.env.NODE_ENV === "development",
-  entities: [TrackedWhale, WhaleActivity, ArbitrageOpportunity, CopyTradeWallet, CopyTradePosition],
+  entities: [TrackedWhale, WhaleActivity, ArbitrageOpportunity, CopyTradeWallet, CopyTradePosition, WhaleFrequencyTracking],
   migrations: ["src/migrations/**/*.ts"],
   subscribers: [],
 });

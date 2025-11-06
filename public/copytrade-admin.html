@@ -536,31 +536,64 @@
             <div class="section">
                 <h2 class="section-title">📊 CopyTrade Positions</h2>
                 <div id="positionsAlert"></div>
-                <div id="positionsLoading" class="loading">Loading positions...</div>
-                <div id="emptyPositionsState" class="empty-state" style="display: none;">
-                    <div class="empty-state-icon">📊</div>
-                    <h3>No positions yet</h3>
-                    <p>Positions will appear here when copytrade wallets make trades</p>
+                
+                <!-- Trader List View -->
+                <div id="tradersView" style="display: none;">
+                    <div style="margin-bottom: 20px;">
+                        <button class="btn btn-secondary btn-small" onclick="showAllPositions()">← Back to All Positions</button>
+                    </div>
+                    <div id="tradersList" class="wallets-list">
+                        <!-- Traders will be populated here -->
+                    </div>
                 </div>
-                <div id="positionsContainer" style="display: none;">
-                    <table class="positions-table">
-                        <thead>
-                            <tr>
-                                <th>Wallet</th>
-                                <th>Market</th>
-                                <th>Outcome</th>
-                                <th>Entry</th>
-                                <th>Exit</th>
-                                <th>Investment</th>
-                                <th>PnL</th>
-                                <th>% PnL</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="positionsTableBody">
-                            <!-- Positions will be populated here -->
-                        </tbody>
-                    </table>
+
+                <!-- Positions View -->
+                <div id="positionsView">
+                    <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+                        <button class="btn btn-primary btn-small" onclick="showTradersView()">📋 View by Trader</button>
+                        <div id="positionsPagination" style="display: none;">
+                            <button class="btn btn-secondary btn-small" id="prevPageBtn" onclick="changePage(-1)">← Previous</button>
+                            <span id="pageInfo" style="margin: 0 15px; color: #666;"></span>
+                            <button class="btn btn-secondary btn-small" id="nextPageBtn" onclick="changePage(1)">Next →</button>
+                        </div>
+                    </div>
+                    <div id="positionsLoading" class="loading">Loading positions...</div>
+                    <div id="emptyPositionsState" class="empty-state" style="display: none;">
+                        <div class="empty-state-icon">📊</div>
+                        <h3>No positions yet</h3>
+                        <p>Positions will appear here when copytrade wallets make trades</p>
+                    </div>
+                    <div id="positionsContainer" style="display: none;">
+                        <table class="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Wallet</th>
+                                    <th>Market</th>
+                                    <th>Outcome</th>
+                                    <th>Entry</th>
+                                    <th>Exit</th>
+                                    <th>Investment</th>
+                                    <th>PnL</th>
+                                    <th>% PnL</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positionsTableBody">
+                                <!-- Positions will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Trader Positions View (Grouped) -->
+                <div id="traderPositionsView" style="display: none;">
+                    <div style="margin-bottom: 20px;">
+                        <button class="btn btn-secondary btn-small" onclick="showTradersView()">← Back to Traders</button>
+                        <h3 id="traderNameHeader" style="margin-top: 15px; color: #333;"></h3>
+                    </div>
+                    <div id="traderPositionsContainer">
+                        <!-- Grouped positions will be populated here -->
+                    </div>
                 </div>
             </div>
         </div>
@@ -623,7 +656,10 @@
                     <div class="stat-card">
                         <h3>Total Positions</h3>
                         <div class="value">${stats.positions.total}</div>
-                        <div class="label">${stats.positions.open} open, ${stats.positions.closed} closed</div>
+                        <div class="label">
+                            ${stats.positions.open || 0} open, 
+                            ${stats.positions.closed || 0} closed
+                        </div>
                     </div>
                     <div class="stat-card">
                         <h3>Overall ROI</h3>
@@ -829,23 +865,49 @@
             }
         }
 
-        // Load positions
-        async function loadPositions() {
+        // Pagination state
+        let currentPage = 0;
+        const positionsPerPage = 50;
+        let totalPositions = 0;
+
+        // Load positions with pagination
+        async function loadPositions(page = 0) {
             try {
-                const response = await fetch(`${API_BASE}/positions?limit=100`);
+                const offset = page * positionsPerPage;
+                const response = await fetch(`${API_BASE}/positions?limit=${positionsPerPage}&offset=${offset}`);
                 if (!response.ok) throw new Error('Failed to load positions');
-                const positions = await response.json();
+                const data = await response.json();
+                
+                const positions = data.positions || [];
+                totalPositions = data.pagination?.total || 0;
+                currentPage = page;
                 
                 document.getElementById('positionsLoading').style.display = 'none';
                 
                 if (positions.length === 0) {
                     document.getElementById('emptyPositionsState').style.display = 'block';
                     document.getElementById('positionsContainer').style.display = 'none';
+                    document.getElementById('positionsPagination').style.display = 'none';
                     return;
                 }
                 
                 document.getElementById('emptyPositionsState').style.display = 'none';
                 document.getElementById('positionsContainer').style.display = 'block';
+                
+                // Show pagination if needed
+                if (totalPositions > positionsPerPage) {
+                    document.getElementById('positionsPagination').style.display = 'flex';
+                    const pageInfo = document.getElementById('pageInfo');
+                    const start = offset + 1;
+                    const end = Math.min(offset + positionsPerPage, totalPositions);
+                    pageInfo.textContent = `Showing ${start}-${end} of ${totalPositions}`;
+                    
+                    // Enable/disable buttons
+                    document.getElementById('prevPageBtn').disabled = page === 0;
+                    document.getElementById('nextPageBtn').disabled = !data.pagination?.hasMore;
+                } else {
+                    document.getElementById('positionsPagination').style.display = 'none';
+                }
                 
                 document.getElementById('positionsTableBody').innerHTML = positions.map(pos => {
                     const pnl = parseFloat(pos.realizedPnl || 0);
@@ -870,6 +932,168 @@
                 console.error('Error loading positions:', error);
                 showAlert('positionsAlert', 'Failed to load positions: ' + error.message, 'error');
                 document.getElementById('positionsLoading').style.display = 'none';
+            }
+        }
+
+        // Change page
+        function changePage(direction) {
+            const newPage = currentPage + direction;
+            if (newPage >= 0) {
+                loadPositions(newPage);
+            }
+        }
+
+        // Show traders view
+        async function showTradersView() {
+            document.getElementById('positionsView').style.display = 'none';
+            document.getElementById('traderPositionsView').style.display = 'none';
+            document.getElementById('tradersView').style.display = 'block';
+            
+            try {
+                const response = await fetch(`${API_BASE}/positions/by-trader`);
+                if (!response.ok) throw new Error('Failed to load traders');
+                const data = await response.json();
+                const traders = data.traders || [];
+                
+                if (traders.length === 0) {
+                    document.getElementById('tradersList').innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📊</div>
+                            <h3>No traders with positions yet</h3>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                document.getElementById('tradersList').innerHTML = traders.map(trader => {
+                    // Group positions by conditionId+outcomeIndex to identify added positions
+                    const positionGroups = new Map();
+                    trader.positions.forEach(pos => {
+                        if (pos.conditionId && pos.outcomeIndex !== undefined) {
+                            const key = `${pos.conditionId}-${pos.outcomeIndex}`;
+                            if (!positionGroups.has(key)) {
+                                positionGroups.set(key, []);
+                            }
+                            positionGroups.get(key).push(pos);
+                        } else {
+                            // Standalone positions
+                            const key = `standalone-${pos.id}`;
+                            positionGroups.set(key, [pos]);
+                        }
+                    });
+                    
+                    // Count by status (only open and closed)
+                    const openCount = trader.positions.filter(p => p.status === 'open').length;
+                    const closedCount = trader.positions.filter(p => p.status === 'closed').length;
+                    
+                    return `
+                        <div class="wallet-card" style="cursor: pointer;" onclick="loadTraderPositions('${trader.walletId}', '${trader.label.replace(/'/g, "\\'")}')">
+                            <div class="wallet-info">
+                                <h3>${trader.label} ${trader.isWhale ? '🐋' : ''}</h3>
+                                <p><strong>Wallet:</strong> ${formatAddress(trader.walletAddress)}</p>
+                                <div style="margin-top: 10px;">
+                                    <span class="badge" style="background: ${trader.subscriptionType === 'paid' ? '#9b59b6' : '#3498db'}; color: white;">
+                                        ${trader.subscriptionType === 'paid' ? '💎 Paid' : '🆓 Free'}
+                                    </span>
+                                    <span class="badge" style="background: #27ae60; color: white;">
+                                        ${trader.positions.length} position${trader.positions.length !== 1 ? 's' : ''}
+                                    </span>
+                                </div>
+                                <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                                    <strong>Status breakdown:</strong><br>
+                                    ${openCount} open, ${closedCount} closed
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Error loading traders:', error);
+                showAlert('positionsAlert', 'Failed to load traders: ' + error.message, 'error');
+            }
+        }
+
+        // Show all positions view
+        function showAllPositions() {
+            document.getElementById('tradersView').style.display = 'none';
+            document.getElementById('traderPositionsView').style.display = 'none';
+            document.getElementById('positionsView').style.display = 'block';
+            loadPositions(0);
+        }
+
+        // Load grouped positions for a trader
+        async function loadTraderPositions(walletId, traderName) {
+            document.getElementById('tradersView').style.display = 'none';
+            document.getElementById('positionsView').style.display = 'none';
+            document.getElementById('traderPositionsView').style.display = 'block';
+            
+            document.getElementById('traderNameHeader').textContent = `Positions for ${traderName}`;
+            document.getElementById('traderPositionsContainer').innerHTML = '<div class="loading">Loading positions...</div>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/positions/grouped/${walletId}`);
+                if (!response.ok) throw new Error('Failed to load grouped positions');
+                const data = await response.json();
+                const grouped = data.grouped || [];
+                
+                if (grouped.length === 0) {
+                    document.getElementById('traderPositionsContainer').innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📊</div>
+                            <h3>No positions found</h3>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                const groupId = `group-${Math.random().toString(36).substr(2, 9)}`;
+                document.getElementById('traderPositionsContainer').innerHTML = grouped.map((group, index) => {
+                    let html = `<div style="margin-bottom: 30px; border: 2px solid #e9ecef; border-radius: 8px; padding: 20px; background: #f8f9fa;">`;
+                    
+                    // Open position (if exists)
+                    if (group.openPosition) {
+                        const pos = group.openPosition;
+                        const isClosed = group.closedPositions && group.closedPositions.length > 0;
+                        const closedPos = isClosed ? group.closedPositions[0] : null;
+                        
+                        html += `
+                            <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid ${isClosed ? '#e74c3c' : '#27ae60'};">
+                                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;">
+                                    <div style="flex: 1;">
+                                        <strong style="color: ${isClosed ? '#e74c3c' : '#27ae60'}; font-size: 1.1em;">
+                                            ${isClosed ? '✅ Closed Position' : '📊 Open Position'}
+                                        </strong>
+                                        <p style="margin: 5px 0; color: #666;"><strong>Market:</strong> ${pos.marketName || 'N/A'}</p>
+                                        <p style="margin: 5px 0; color: #666;"><strong>Outcome:</strong> ${pos.outcome || 'N/A'}</p>
+                                    </div>
+                                    <span class="badge badge-${isClosed ? 'active' : 'active'}">${isClosed ? 'CLOSED' : 'OPEN'}</span>
+                                </div>
+                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px;">
+                                    <div><strong>Entry:</strong> $${parseFloat(pos.entryPrice).toFixed(4)}<br><small>${new Date(pos.entryDate).toLocaleDateString()}</small></div>
+                                    <div><strong>Investment:</strong> ${formatCurrency(parseFloat(pos.simulatedInvestment))}</div>
+                                    <div><strong>Shares:</strong> ${parseFloat(pos.sharesBought).toFixed(2)}</div>
+                                    ${isClosed && closedPos ? `
+                                        <div><strong>Exit:</strong> $${parseFloat(closedPos.exitPrice || 0).toFixed(4)}<br><small>${closedPos.exitDate ? new Date(closedPos.exitDate).toLocaleDateString() : '-'}</small></div>
+                                        <div class="${parseFloat(closedPos.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}"><strong>PnL:</strong> ${formatCurrency(parseFloat(closedPos.realizedPnl || 0))}</div>
+                                        <div class="${parseFloat(closedPos.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}"><strong>% PnL:</strong> ${formatPercent(closedPos.percentPnl || 0)}</div>
+                                        ${closedPos.finalValue ? `<div><strong>Final Value:</strong> ${formatCurrency(parseFloat(closedPos.finalValue))}</div>` : ''}
+                                    ` : ''}
+                                </div>
+                            </div>
+                        `;
+                    }
+                    
+                    html += '</div>';
+                    return html;
+                }).join('');
+            } catch (error) {
+                console.error('Error loading grouped positions:', error);
+                document.getElementById('traderPositionsContainer').innerHTML = `
+                    <div class="alert alert-error">
+                        <span>❌</span>
+                        <span>Failed to load positions: ${error.message}</span>
+                    </div>
+                `;
             }
         }
 
@@ -982,6 +1206,14 @@
             }
         }
 
+        // Toggle group visibility
+        function toggleGroup(groupId) {
+            const group = document.getElementById(groupId);
+            if (group) {
+                group.style.display = group.style.display === 'none' ? 'block' : 'none';
+            }
+        }
+
         // Initialize on page load
         window.addEventListener('DOMContentLoaded', () => {
             loadStats();
@@ -994,7 +1226,9 @@
             // Refresh every 30 seconds
             setInterval(() => {
                 loadStats();
-                loadPositions();
+                if (document.getElementById('positionsView').style.display !== 'none') {
+                    loadPositions(currentPage);
+                }
             }, 30000);
         });
     </script>

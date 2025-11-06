@@ -3,6 +3,7 @@ import { TrackedWhale } from "../entities/TrackedWhale.js";
 import { WhaleActivity } from "../entities/WhaleActivity.js";
 import { CopyTradePosition } from "../entities/CopyTradePosition.js";
 import { CopyTradeWallet } from "../entities/CopyTradeWallet.js";
+import { WhaleFrequencyTracking } from "../entities/WhaleFrequencyTracking.js";
 import { polymarketService, type PolymarketTrade } from "./polymarket.service.js";
 import { discordService } from "./discord.service.js";
 import { googleSheetsService } from "./google-sheets.service.js";
@@ -33,12 +34,46 @@ class TradePollingService {
   // Frequency tracking: stores frequency counter per whale per reset period
   private whaleFrequencyMap: Map<string, WhaleFrequencyTracker> = new Map();
   
+  // Lock mechanism for frequency operations to prevent race conditions
+  // Each whale has a queue of operations that must execute sequentially
+  private whaleFrequencyLocks: Map<string, Promise<void>> = new Map();
+  
   // Frequency reset interval in hours (default 24, configurable via env)
   private readonly FREQUENCY_RESET_HOURS = parseInt(process.env.WHALE_FREQUENCY_RESET_HOURS || "24", 10);
+  
+  /**
+   * Acquire a lock for frequency operations on a whale
+   * Ensures all frequency checks and decrements are atomic
+   */
+  private async acquireFrequencyLock(whaleId: string): Promise<() => void> {
+    const currentLock = this.whaleFrequencyLocks.get(whaleId) || Promise.resolve();
+    
+    let releaseLock: () => void;
+    const newLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    
+    // Wait for current lock to complete before proceeding
+    await currentLock;
+    
+    // Set this as the new current lock
+    this.whaleFrequencyLocks.set(whaleId, newLock);
+    
+    // Return release function
+    return () => {
+      releaseLock();
+      // Clean up if this is the current lock
+      const current = this.whaleFrequencyLocks.get(whaleId);
+      if (current === newLock) {
+        this.whaleFrequencyLocks.delete(whaleId);
+      }
+    };
+  }
   
   // Repositories
   private readonly copytradePositionRepository = AppDataSource.getRepository(CopyTradePosition);
   private readonly copytradeWalletRepository = AppDataSource.getRepository(CopyTradeWallet);
+  private readonly frequencyTrackingRepository = AppDataSource.getRepository(WhaleFrequencyTracking);
 
   constructor() {
     // Log configuration
@@ -87,39 +122,155 @@ class TradePollingService {
   }
 
   /**
+   * Load frequency tracking data from database for a whale
+   * Returns frequency from database or null if not found
+   */
+  private async loadFrequencyFromDatabase(whaleId: string): Promise<WhaleFrequencyTracking | null> {
+    try {
+      return await this.frequencyTrackingRepository.findOne({
+        where: { whaleId },
+      });
+    } catch (error) {
+      console.error(`❌ Error loading frequency from database for whale ${whaleId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Persist frequency tracking data to database
+   */
+  private async persistFrequencyToDatabase(
+    whaleId: string,
+    remainingFrequency: number,
+    resetTime: Date
+  ): Promise<void> {
+    try {
+      const existing = await this.frequencyTrackingRepository.findOne({
+        where: { whaleId },
+      });
+
+      if (existing) {
+        existing.remainingFrequency = remainingFrequency;
+        existing.resetTime = resetTime;
+        await this.frequencyTrackingRepository.save(existing);
+      } else {
+        const tracking = this.frequencyTrackingRepository.create({
+          whaleId,
+          remainingFrequency,
+          resetTime,
+        });
+        await this.frequencyTrackingRepository.save(tracking);
+      }
+    } catch (error) {
+      console.error(`❌ Error persisting frequency to database for whale ${whaleId}:`, error);
+    }
+  }
+
+  /**
    * Get or initialize frequency tracker for a whale
+   * Loads from database first, then uses memory cache
    * Returns current frequency count, initializing if needed or resetting if period expired
    */
-  private getWhaleFrequency(whale: TrackedWhale): number {
+  private async getWhaleFrequency(whale: TrackedWhale): Promise<number> {
     const tracker = this.whaleFrequencyMap.get(whale.id);
     const now = new Date();
 
-    // If no tracker exists or reset time has passed, initialize/reset
-    if (!tracker || now >= tracker.resetTime) {
+    // If no tracker in memory, try to load from database
+    if (!tracker) {
+      const dbTracking = await this.loadFrequencyFromDatabase(whale.id);
+      
+      if (dbTracking) {
+        // Check if reset time has passed
+        if (now >= dbTracking.resetTime) {
+          // Reset period expired, initialize with full limit
+          const frequencyLimit = this.getWhaleFrequencyLimit(whale);
+          const resetTime = new Date(now.getTime() + this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000);
+          
+          const newTracker: WhaleFrequencyTracker = {
+            whaleId: whale.id,
+            frequency: frequencyLimit,
+            resetTime: resetTime,
+          };
+          
+          this.whaleFrequencyMap.set(whale.id, newTracker);
+          await this.persistFrequencyToDatabase(whale.id, frequencyLimit, resetTime);
+
+          const frequencySource = whale.frequency !== null && whale.frequency !== undefined 
+            ? `custom (${whale.frequency})` 
+            : `default (${whale.subscriptionType})`;
+
+          console.log(
+            `🔄 Reset frequency for ${whale.label || whale.walletAddress} (period expired) ` +
+            `(${frequencySource}): ${frequencyLimit} trades per ${this.FREQUENCY_RESET_HOURS} hours`
+          );
+
+          return frequencyLimit;
+        } else {
+          // Load from database
+          const dbTracker: WhaleFrequencyTracker = {
+            whaleId: whale.id,
+            frequency: dbTracking.remainingFrequency,
+            resetTime: dbTracking.resetTime,
+          };
+          
+          this.whaleFrequencyMap.set(whale.id, dbTracker);
+          
+          const frequencySource = whale.frequency !== null && whale.frequency !== undefined 
+            ? `custom (${whale.frequency})` 
+            : `default (${whale.subscriptionType})`;
+
+          console.log(
+            `📊 Loaded frequency from database for ${whale.label || whale.walletAddress} ` +
+            `(${frequencySource}): ${dbTracking.remainingFrequency} remaining (resets ${dbTracking.resetTime.toISOString()})`
+          );
+
+          return dbTracking.remainingFrequency;
+        }
+      } else {
+        // No database entry, initialize with full limit
+        const frequencyLimit = this.getWhaleFrequencyLimit(whale);
+        const resetTime = new Date(now.getTime() + this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000);
+        
+        const newTracker: WhaleFrequencyTracker = {
+          whaleId: whale.id,
+          frequency: frequencyLimit,
+          resetTime: resetTime,
+        };
+        
+        this.whaleFrequencyMap.set(whale.id, newTracker);
+        await this.persistFrequencyToDatabase(whale.id, frequencyLimit, resetTime);
+
+        const frequencySource = whale.frequency !== null && whale.frequency !== undefined 
+          ? `custom (${whale.frequency})` 
+          : `default (${whale.subscriptionType})`;
+
+        console.log(
+          `📊 Initialized frequency tracker for ${whale.label || whale.walletAddress} ` +
+          `(${frequencySource}): ${frequencyLimit} trades per ${this.FREQUENCY_RESET_HOURS} hours`
+        );
+
+        return frequencyLimit;
+      }
+    }
+
+    // Tracker exists in memory, check if reset time has passed
+    if (now >= tracker.resetTime) {
       const frequencyLimit = this.getWhaleFrequencyLimit(whale);
       const resetTime = new Date(now.getTime() + this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000);
       
-      this.whaleFrequencyMap.set(whale.id, {
-        whaleId: whale.id,
-        frequency: frequencyLimit,
-        resetTime: resetTime,
-      });
+      tracker.frequency = frequencyLimit;
+      tracker.resetTime = resetTime;
+      
+      await this.persistFrequencyToDatabase(whale.id, frequencyLimit, resetTime);
 
       const frequencySource = whale.frequency !== null && whale.frequency !== undefined 
         ? `custom (${whale.frequency})` 
         : `default (${whale.subscriptionType})`;
 
-      if (!tracker) {
-        console.log(
-          `📊 Initialized frequency tracker for ${whale.label || whale.walletAddress} ` +
-          `(${frequencySource}): ${frequencyLimit} trades per ${this.FREQUENCY_RESET_HOURS} hours`
-        );
-      } else {
-        console.log(
-          `🔄 Reset frequency for ${whale.label || whale.walletAddress} ` +
-          `(${frequencySource}): ${frequencyLimit} trades per ${this.FREQUENCY_RESET_HOURS} hours`
-        );
-      }
+      console.log(
+        `🔄 Reset frequency for ${whale.label || whale.walletAddress} (period expired) ` +
+        `(${frequencySource}): ${frequencyLimit} trades per ${this.FREQUENCY_RESET_HOURS} hours`
+      );
 
       return frequencyLimit;
     }
@@ -128,25 +279,87 @@ class TradePollingService {
   }
 
   /**
-   * Decrement frequency for a whale (called when storing an initial buy trade)
+   * Atomically check frequency limit and decrement for initial buy trades (status = "open")
+   * Returns true if frequency is available and was decremented, false otherwise
+   * This method is thread-safe and prevents race conditions
    */
-  private decrementWhaleFrequency(whale: TrackedWhale): void {
+  private async checkAndDecrementFrequency(whale: TrackedWhale): Promise<boolean> {
+    const releaseLock = await this.acquireFrequencyLock(whale.id);
+    
+    try {
+      // Check frequency with lock held (atomic operation)
+      const currentFrequency = await this.getWhaleFrequency(whale);
+      
+      if (currentFrequency <= 0) {
+        return false;
+      }
+      
+      // Decrement frequency (atomic operation - lock ensures no other trade can interfere)
+      await this.decrementWhaleFrequency(whale);
+      return true;
+    } finally {
+      releaseLock();
+    }
+  }
+
+  /**
+   * Decrement frequency for a whale (called when storing an initial buy trade)
+   * NOTE: This method should only be called while holding the frequency lock
+   * Use checkAndDecrementFrequency() for thread-safe operations
+   */
+  private async decrementWhaleFrequency(whale: TrackedWhale): Promise<void> {
     const tracker = this.whaleFrequencyMap.get(whale.id);
     if (!tracker) {
       // Should not happen, but initialize if it does
-      this.getWhaleFrequency(whale);
+      await this.getWhaleFrequency(whale);
+      const updatedTracker = this.whaleFrequencyMap.get(whale.id);
+      if (!updatedTracker) {
+        console.error(`❌ Failed to get frequency tracker after initialization for whale ${whale.id}`);
+        return;
+      }
+      // Decrement the initialized frequency
+      updatedTracker.frequency = Math.max(0, updatedTracker.frequency - 1);
+      await this.persistFrequencyToDatabase(
+        whale.id,
+        updatedTracker.frequency,
+        updatedTracker.resetTime
+      );
+      console.log(
+        `📊 Frequency updated for ${whale.label || whale.walletAddress}: ` +
+        `${updatedTracker.frequency} remaining (${whale.subscriptionType} subscription)`
+      );
       return;
     }
 
     const now = new Date();
-    // If reset time has passed, reset first
+    // If reset time has passed, reset first (but continue to decrement)
     if (now >= tracker.resetTime) {
-      this.getWhaleFrequency(whale);
+      await this.getWhaleFrequency(whale);
+      // Get the tracker again after reset
+      const resetTracker = this.whaleFrequencyMap.get(whale.id);
+      if (!resetTracker) {
+        console.error(`❌ Failed to get frequency tracker after reset for whale ${whale.id}`);
+        return;
+      }
+      // Decrement the reset frequency
+      resetTracker.frequency = Math.max(0, resetTracker.frequency - 1);
+      await this.persistFrequencyToDatabase(
+        whale.id,
+        resetTracker.frequency,
+        resetTracker.resetTime
+      );
+      console.log(
+        `📊 Frequency updated for ${whale.label || whale.walletAddress} (after reset): ` +
+        `${resetTracker.frequency} remaining (${whale.subscriptionType} subscription)`
+      );
       return;
     }
 
     // Decrement frequency (ensure it doesn't go below 0)
     tracker.frequency = Math.max(0, tracker.frequency - 1);
+    
+    // Persist to database
+    await this.persistFrequencyToDatabase(whale.id, tracker.frequency, tracker.resetTime);
     
     console.log(
       `📊 Frequency updated for ${whale.label || whale.walletAddress}: ` +
@@ -157,18 +370,62 @@ class TradePollingService {
   /**
    * Reset frequencies for all whales (called periodically)
    */
-  private resetAllWhaleFrequencies(): void {
+  private async resetAllWhaleFrequencies(): Promise<void> {
     console.log(`🔄 Resetting frequencies for all whales...`);
-    const whaleRepository = AppDataSource.getRepository(TrackedWhale);
-    
-    whaleRepository.find({ where: { isActive: true } }).then((whales) => {
-      for (const whale of whales) {
-        this.getWhaleFrequency(whale); // This will reset if needed
-      }
+    try {
+      const whales = await this.whaleRepository.find({ where: { isActive: true } });
+      
+      await Promise.all(
+        whales.map(whale => this.getWhaleFrequency(whale)) // This will reset if needed and persist
+      );
+      
       console.log(`✅ Frequency reset complete for ${whales.length} active whales`);
-    }).catch((error) => {
+    } catch (error) {
       console.error(`❌ Error resetting frequencies:`, error);
-    });
+    }
+  }
+
+  /**
+   * Load all frequency tracking data from database on startup
+   */
+  private async loadAllFrequenciesFromDatabase(): Promise<void> {
+    try {
+      console.log(`📊 Loading frequency tracking data from database...`);
+      
+      const allTracking = await this.frequencyTrackingRepository.find({
+        relations: ["whale"],
+      });
+
+      const now = new Date();
+      let loadedCount = 0;
+      let resetCount = 0;
+
+      for (const tracking of allTracking) {
+        // Check if reset time has passed
+        if (now >= tracking.resetTime) {
+          // Will be reset when first accessed
+          resetCount++;
+          continue;
+        }
+
+        // Load into memory cache
+        const tracker: WhaleFrequencyTracker = {
+          whaleId: tracking.whaleId,
+          frequency: tracking.remainingFrequency,
+          resetTime: tracking.resetTime,
+        };
+        
+        this.whaleFrequencyMap.set(tracking.whaleId, tracker);
+        loadedCount++;
+      }
+
+      console.log(
+        `✅ Loaded ${loadedCount} frequency trackers from database ` +
+        `(${resetCount} will reset on next access)`
+      );
+    } catch (error) {
+      console.error(`❌ Error loading frequencies from database:`, error);
+    }
   }
 
   /**
@@ -191,35 +448,24 @@ class TradePollingService {
         return null;
       }
 
+      // Get frequency (will load from database if needed)
+      const remainingFrequency = await this.getWhaleFrequency(whale);
       const tracker = this.whaleFrequencyMap.get(whaleId);
-      const now = new Date();
 
-      // If no tracker exists or reset time has passed, initialize/reset
-      if (!tracker || now >= tracker.resetTime) {
-        const frequencyLimit = this.getWhaleFrequencyLimit(whale);
-        const resetTime = new Date(now.getTime() + this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000);
-        
-        this.whaleFrequencyMap.set(whaleId, {
-          whaleId: whaleId,
-          frequency: frequencyLimit,
-          resetTime: resetTime,
-        });
-
-        return {
-          whaleId: whaleId,
-          remainingFrequency: frequencyLimit,
-          frequencyLimit: frequencyLimit,
-          resetTime: resetTime,
-          isCustom: whale.frequency !== null && whale.frequency !== undefined,
-        };
+      if (!tracker) {
+        console.error(`❌ Tracker not found after getWhaleFrequency for whale ${whaleId}`);
+        return null;
       }
 
+      const frequencyLimit = this.getWhaleFrequencyLimit(whale);
+      const isCustom = whale.frequency !== null && whale.frequency !== undefined;
+
       return {
-        whaleId: whaleId,
+        whaleId,
         remainingFrequency: tracker.frequency,
-        frequencyLimit: this.getWhaleFrequencyLimit(whale),
+        frequencyLimit: frequencyLimit,
         resetTime: tracker.resetTime,
-        isCustom: whale.frequency !== null && whale.frequency !== undefined,
+        isCustom,
       };
     } catch (error) {
       console.error(`❌ Error getting frequency status for whale ${whaleId}:`, error);
@@ -507,16 +753,25 @@ class TradePollingService {
       });
     }, this.CLEANUP_INTERVAL_MS);
 
+    // Load frequency tracking data from database on startup
+    this.loadAllFrequenciesFromDatabase().catch((error) => {
+      console.error("❌ Error loading frequencies from database:", error);
+    });
+
     // Start frequency reset service
     const frequencyResetIntervalMs = this.FREQUENCY_RESET_HOURS * 60 * 60 * 1000;
     console.log(`🔄 Starting frequency reset service (every ${this.FREQUENCY_RESET_HOURS} hours)`);
     
-    // Run frequency reset immediately on start to initialize all whales
-    this.resetAllWhaleFrequencies();
+    // Run frequency reset after loading (will only reset expired trackers)
+    this.resetAllWhaleFrequencies().catch((error) => {
+      console.error("❌ Error in initial frequency reset:", error);
+    });
 
     // Set up frequency reset interval
     this.frequencyResetInterval = setInterval(() => {
-      this.resetAllWhaleFrequencies();
+      this.resetAllWhaleFrequencies().catch((error) => {
+        console.error("❌ Error in frequency reset interval:", error);
+      });
     }, frequencyResetIntervalMs);
   }
 
@@ -906,12 +1161,40 @@ class TradePollingService {
           continue;
         }
         
+        // Additional check: "added" and "partially_closed" trades should ONLY be sent for whale category whales
+        // Regular whales should not receive these status alerts
+        if ((activity.status === "added" || activity.status === "partially_closed") && whaleCategory !== "whale") {
+          console.log(
+            `⏭️  Skipping Discord notification (${activity.status} status only allowed for whale category, not ${whaleCategory}) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+          );
+          continue;
+        }
+        
         // Skip Discord notifications for closed trades with losses (negative percentPnl)
         if (activity.status === "closed" && positionData.percentPnl !== undefined && positionData.percentPnl < 0) {
           console.log(
             `⏭️  Skipping Discord notification (loss detected: ${positionData.percentPnl.toFixed(2)}%) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
           );
           continue;
+        }
+        
+        // Check frequency limit ONLY for initial BUY trades (status = "open") before sending Discord notification
+        // Note: This check does NOT apply to:
+        // - Closed positions (status = "closed") - always allowed
+        // - Partially closed positions (status = "partially_closed") - always allowed
+        // - Added BUY trades (status = "added") - always allowed
+        // - SELL trades - always allowed
+        // Trade is already stored (copytraded), we're only checking if we should send Discord notification
+        if (activity.activityType === "POLYMARKET_BUY" && activity.status === "open") {
+          const canSend = await this.checkAndDecrementFrequency(whale);
+          if (!canSend) {
+            console.log(
+              `⏭️  Skipping Discord notification for initial BUY trade (frequency limit reached) | ` +
+              `Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id} | Trade was still stored for copytrade`
+            );
+            continue;
+          }
+          // Frequency has been decremented atomically, Discord notification can proceed
         }
         
         // If we found a matching trade, reply to it; otherwise send new message
@@ -1121,7 +1404,8 @@ class TradePollingService {
    * Check if a trade meets storage criteria
    * - SELL trades: no filtering (always allow added, partially_closed, closed)
    * - Added BUY trades (with existing buy): no filtering
-   * - Initial BUY trades: filtering based on whale category, price <= $0.95, and frequency limit
+   * - Initial BUY trades: filtering based on whale category, price <= $0.95
+   *   Note: Frequency limit is checked at Discord notification time, not storage time
    */
   private async shouldStoreTrade(
     trade: PolymarketTrade,
@@ -1146,7 +1430,7 @@ class TradePollingService {
       }
     }
     
-    // Initial BUY trade: apply filtering based on whale category, price, and frequency
+    // Initial BUY trade: apply filtering based on whale category and price (frequency is checked at Discord notification time)
     const minUsdValue = this.getMinUsdValueForStorage(whale);
     
     // Check USD value threshold
@@ -1159,15 +1443,8 @@ class TradePollingService {
       return false;
     }
     
-    // Check frequency limit for initial buy trades
-    const currentFrequency = this.getWhaleFrequency(whale);
-    if (currentFrequency <= 0) {
-      console.log(
-        `⏭️  Skipping initial BUY trade (frequency limit reached: ${currentFrequency}) | ` +
-        `Whale: ${whale.label || whale.walletAddress} | Trade: ${trade.transactionHash}`
-      );
-      return false;
-    }
+    // Note: Frequency limit check is now done at Discord notification time, not storage time
+    // This allows all initial buys to be stored (copytraded) regardless of frequency limits
     
     return true;
   }
@@ -1230,6 +1507,9 @@ class TradePollingService {
         );
         return null;
       }
+
+      // Note: Frequency limit check is now done at Discord notification time, not storage time
+      // This allows all initial buys to be stored (copytraded) regardless of frequency limits
 
       // Validate that required parent trades exist for non-initial trades
       if (status === "added" || status === "partially_closed" || status === "closed") {
@@ -1333,18 +1613,17 @@ class TradePollingService {
         `✅ Stored ${trade.side} trade for ${whale.label || whale.walletAddress}: $${usdValue} | Status: ${status || 'N/A'}`
       );
 
-      // Decrement frequency for initial buy trades (status = "open")
-      // This happens after successfully storing the trade
-      if (trade.side === "BUY" && status === "open") {
-        this.decrementWhaleFrequency(whale);
-      }
+      // Note: Frequency limit check for initial BUY trades (status = "open") is now done
+      // at Discord notification time, not storage time. This allows all initial buys to be
+      // stored (copytraded) regardless of frequency limits.
 
-      // Create copytrade position if whale is in copytrade and this is a BUY trade (open or added)
+      // Create copytrade position if whale is in copytrade and this is an initial BUY trade (status = "open")
+      // Skip "added" buys - they don't create separate positions
       if (whale.isCopytrade) {
-        if (trade.side === "BUY" && (status === "open" || status === "added")) {
+        if (trade.side === "BUY" && status === "open") {
           console.log(
-            `📊 CopyTrade: Processing BUY trade for ${whale.label || whale.walletAddress} | ` +
-            `Status: ${status} | Market: ${trade.title} | Price: $${trade.price}`
+            `📊 CopyTrade: Processing initial BUY trade for ${whale.label || whale.walletAddress} | ` +
+            `Market: ${trade.title} | Price: $${trade.price}`
           );
           await this.createCopytradePosition(whale, savedActivity, trade, status);
         } else if (trade.side === "SELL" && status) {
@@ -1660,17 +1939,24 @@ class TradePollingService {
                     `⏭️  Skipping Discord reply (status "${activity.status}" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
                   );
                 } else {
-                  const replyMessageId = await discordService.replyToMessage(
-                    matchingActivity.discordMessageId, 
-                    embed,
-                    whale.category || "regular",
-                    activity.category || undefined,
-                    whale.subscriptionType || "free"
-                  );
-                  
-                  if (replyMessageId) {
-                    activity.discordMessageId = replyMessageId;
-                    await this.activityRepository.save(activity);
+                  // Additional check: "added" and "partially_closed" trades should ONLY be sent for whale category whales
+                  if ((activity.status === "added" || activity.status === "partially_closed") && whaleCategoryForCheck !== "whale") {
+                    console.log(
+                      `⏭️  Skipping Discord reply (${activity.status} status only allowed for whale category, not ${whaleCategoryForCheck}) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                    );
+                  } else {
+                    const replyMessageId = await discordService.replyToMessage(
+                      matchingActivity.discordMessageId, 
+                      embed,
+                      whale.category || "regular",
+                      activity.category || undefined,
+                      whale.subscriptionType || "free"
+                    );
+                    
+                    if (replyMessageId) {
+                      activity.discordMessageId = replyMessageId;
+                      await this.activityRepository.save(activity);
+                    }
                   }
                 }
               } else {
@@ -1690,8 +1976,15 @@ class TradePollingService {
                   `⏭️  Skipping Discord update (loss detected: ${positionData.percentPnl.toFixed(2)}%) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
                 );
               } else {
-                // activity.discordMessageId is guaranteed to be defined by the if condition above
-                const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
+                // Additional check: "added" and "partially_closed" trades should ONLY be sent for whale category whales
+                const whaleCategoryForUpdate = whale.category || "regular";
+                if ((activity.status === "added" || activity.status === "partially_closed") && whaleCategoryForUpdate !== "whale") {
+                  console.log(
+                    `⏭️  Skipping Discord update (${activity.status} status only allowed for whale category, not ${whaleCategoryForUpdate}) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                  );
+                } else {
+                  // activity.discordMessageId is guaranteed to be defined by the if condition above
+                  const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
                 walletAddress: whale.walletAddress,
                 traderName: whale.label,
                 profileUrl,
@@ -1714,11 +2007,12 @@ class TradePollingService {
                 tradeCategory: activity.category || undefined,
               });
 
-              if (!updateSuccess) {
-                console.warn(
-                  `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
-                );
-              }
+                  if (!updateSuccess) {
+                    console.warn(
+                      `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
+                    );
+                  }
+                }
               }
             }
           } else if (activity.discordMessageId && !shouldUpdate) {
@@ -2105,17 +2399,24 @@ class TradePollingService {
                     `⏭️  Skipping Discord reply (status "${activity.status}" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
                   );
                 } else {
-                  const replyMessageId = await discordService.replyToMessage(
-                    matchingActivity.discordMessageId, 
-                    embed,
-                    whale.category || "regular",
-                    activity.category || undefined,
-                    whale.subscriptionType || "free"
-                  );
-                  
-                  if (replyMessageId) {
-                    activity.discordMessageId = replyMessageId;
-                    await this.activityRepository.save(activity);
+                  // Additional check: "added" and "partially_closed" trades should ONLY be sent for whale category whales
+                  if ((activity.status === "added" || activity.status === "partially_closed") && whaleCategoryForCheck !== "whale") {
+                    console.log(
+                      `⏭️  Skipping Discord reply (${activity.status} status only allowed for whale category, not ${whaleCategoryForCheck}) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                    );
+                  } else {
+                    const replyMessageId = await discordService.replyToMessage(
+                      matchingActivity.discordMessageId, 
+                      embed,
+                      whale.category || "regular",
+                      activity.category || undefined,
+                      whale.subscriptionType || "free"
+                    );
+                    
+                    if (replyMessageId) {
+                      activity.discordMessageId = replyMessageId;
+                      await this.activityRepository.save(activity);
+                    }
                   }
                 }
               } else {
@@ -2135,8 +2436,15 @@ class TradePollingService {
                   `⏭️  Skipping Discord update (loss detected: ${positionData.percentPnl.toFixed(2)}%) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
                 );
               } else {
-                // activity.discordMessageId is guaranteed to be defined by the if condition above
-                const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
+                // Additional check: "added" and "partially_closed" trades should ONLY be sent for whale category whales
+                const whaleCategoryForUpdate = whale.category || "regular";
+                if ((activity.status === "added" || activity.status === "partially_closed") && whaleCategoryForUpdate !== "whale") {
+                  console.log(
+                    `⏭️  Skipping Discord update (${activity.status} status only allowed for whale category, not ${whaleCategoryForUpdate}) | Whale: ${whale.label || whale.walletAddress} | Activity: ${activity.id}`
+                  );
+                } else {
+                  // activity.discordMessageId is guaranteed to be defined by the if condition above
+                  const updateSuccess = await discordService.updateWhaleAlert(activity.discordMessageId!, {
                 walletAddress: whale.walletAddress,
                 traderName: whale.label,
                 profileUrl,
@@ -2159,11 +2467,12 @@ class TradePollingService {
                 tradeCategory: activity.category || undefined,
               });
 
-              if (!updateSuccess) {
-                console.warn(
-                  `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
-                );
-              }
+                  if (!updateSuccess) {
+                    console.warn(
+                      `⚠️  Discord message update failed | Whale: ${whale.label || whale.walletAddress} | Message ID: ${activity.discordMessageId}`
+                    );
+                  }
+                }
               }
             }
           } else if (activity.discordMessageId && !shouldUpdate) {
@@ -2337,19 +2646,22 @@ class TradePollingService {
           `PnL: $${realizedPnl.toFixed(2)} (${percentPnl.toFixed(2)}%) | Market: ${trade.title}`
         );
 
-        // Update Google Sheets
-        try {
-          await googleSheetsService.updatePosition(position.id, {
-            exitDate: position.exitDate,
-            exitPrice: position.exitPrice,
-            sharesSold: position.sharesSold,
-            realizedPnl: position.realizedPnl,
-            percentPnl: position.percentPnl,
-            finalValue: position.finalValue,
-            status: position.status,
-          });
-        } catch (sheetsError) {
-          console.error("⚠️  Failed to update Google Sheets:", sheetsError);
+        // Update Google Sheets only for fully closed positions (skip partially_closed)
+        if (position.status === "closed") {
+          try {
+            await googleSheetsService.updatePosition(position.id, {
+              exitDate: position.exitDate,
+              exitPrice: position.exitPrice,
+              sharesSold: position.sharesSold,
+              realizedPnl: position.realizedPnl,
+              percentPnl: position.percentPnl,
+              finalValue: position.finalValue,
+              status: position.status,
+              realizedOutcome: position.realizedOutcome,
+            });
+          } catch (sheetsError) {
+            console.error("⚠️  Failed to update Google Sheets:", sheetsError);
+          }
         }
       }
     } catch (error) {
@@ -2396,8 +2708,19 @@ class TradePollingService {
         console.log(`📊 Created virtual CopyTradeWallet for tracked whale: ${whale.label || whale.walletAddress}`);
       }
       
-      // Create copytrade position for this BUY trade
-      // Each BUY trade gets its own position with $500 (or configured amount) investment
+      // For "added" buys, don't create separate copytrade positions
+      // They're additions to existing positions and should be aggregated
+      // Only create positions for "open" status (initial buys)
+      if (status === "added") {
+        console.log(
+          `⏭️  Skipping copytrade position for added BUY (aggregates into existing position) | ` +
+          `Whale: ${whale.label || whale.walletAddress} | Market: ${trade.title}`
+        );
+        return;
+      }
+
+      // Create copytrade position only for initial BUY trades (status = "open")
+      // Each initial BUY trade gets its own position with $500 (or configured amount) investment
       const position = this.copytradePositionRepository.create({
         copyTradeWalletId: copytradeWallet.id,
         whaleActivityId: activity.id,
@@ -2413,20 +2736,22 @@ class TradePollingService {
         entryDate: new Date(trade.timestamp * 1000),
         entryTransactionHash: trade.transactionHash,
         status: "open",
+        metadata: {
+          originalActivityStatus: status, // Store original status for reference
+        },
       });
       
       const savedPosition = await this.copytradePositionRepository.save(position);
       
-      const statusLabel = status === "added" ? "added BUY" : "initial BUY";
       console.log(
-        `📊 Created copytrade position (${statusLabel}) for ${whale.label || whale.walletAddress}: ` +
+        `📊 Created copytrade position (initial BUY) for ${whale.label || whale.walletAddress}: ` +
         `$${investment} @ $${entryPrice.toFixed(4)} = ${sharesBought.toFixed(2)} shares | Market: ${trade.title}`
       );
       
       // Calculate trader's actual USD value for this trade
       const traderUsdValue = trade.size * trade.price;
       
-      // Update Google Sheets
+      // Update Google Sheets (only for initial "open" positions)
       try {
         await googleSheetsService.appendPosition({
           walletAddress: whale.walletAddress,
@@ -2439,7 +2764,7 @@ class TradePollingService {
           simulatedInvestment: investment,
           traderUsdValue: traderUsdValue, // Trader's actual USD value
           sharesBought: sharesBought.toString(),
-          status: status, // "open" or "added"
+          status: "open", // Always use "open" for initial positions sent to Google Sheets
           positionId: savedPosition.id,
           conditionId: trade.conditionId,
           outcomeIndex: trade.outcomeIndex,

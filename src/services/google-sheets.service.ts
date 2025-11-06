@@ -301,17 +301,42 @@ class GoogleSheetsService {
    * - Max 100 characters
    * - Cannot contain: / \ ? * [ ]
    * - Cannot be empty
+   * 
+   * Ensures uniqueness by including wallet address (or part of it) to prevent different traders
+   * from sharing the same sheet when they have the same label/name.
    */
   private sanitizeSheetName(traderName?: string, walletAddress?: string): string {
-    // Use trader name if available, otherwise use wallet address
-    const name = traderName || walletAddress || "Unknown Trader";
+    // Always include wallet address (or part of it) to ensure uniqueness per trader
+    // Format: "TraderName (0x1234...)" or "0x1234..." if no name
+    let baseName = traderName || "";
+    let addressSuffix = "";
+    
+    if (walletAddress) {
+      // Use first 8 chars of wallet address for uniqueness (e.g., "0x12345678")
+      const shortAddress = walletAddress.length >= 10 
+        ? walletAddress.substring(0, 10) 
+        : walletAddress;
+      addressSuffix = ` (${shortAddress})`;
+    }
+    
+    // Combine name and address suffix
+    let fullName = baseName 
+      ? `${baseName}${addressSuffix}`
+      : (walletAddress || "Unknown Trader");
     
     // Remove invalid characters
-    let sanitized = name.replace(/[\/\\\?\*\[\]]/g, "");
+    let sanitized = fullName.replace(/[\/\\\?\*\[\]]/g, "");
     
-    // Truncate to 100 characters (Google Sheets limit)
+    // Truncate to 100 characters (Google Sheets limit), but preserve wallet address suffix if possible
     if (sanitized.length > 100) {
-      sanitized = sanitized.substring(0, 100);
+      // If we have a trader name, truncate the name part but keep the address suffix
+      if (baseName && addressSuffix) {
+        const maxNameLength = 100 - addressSuffix.length;
+        sanitized = `${baseName.substring(0, maxNameLength)}${addressSuffix}`;
+      } else {
+        // Just truncate to 100 chars
+        sanitized = sanitized.substring(0, 100);
+      }
     }
     
     // Ensure it's not empty
@@ -632,6 +657,12 @@ class GoogleSheetsService {
    * Queue a position for batch writing
    */
   private async queuePosition(data: PositionData): Promise<void> {
+    // Skip "added" and "partially_closed" positions - only track "open" and "closed"
+    if (data.status === "added" || data.status === "partially_closed") {
+      console.log(`📊 Skipping ${data.status} position for Google Sheets (only tracking open/closed)`);
+      return;
+    }
+
     if (!this.isInitialized) {
       await this.initialize();
     }
@@ -942,67 +973,76 @@ class GoogleSheetsService {
       // Ensure trader sheet exists (create if needed)
       await this.ensureTraderSheetExists(spreadsheetId, sheetName);
 
-      // Find row by matching position ID (stored in metadata or via wallet address + entry date)
-      const rowIndex = await this.findRowByPositionId(spreadsheetId, sheetName, positionId, position.copyTradeWallet.walletAddress, position.entryDate);
+      // Find the matching open row by conditionId + outcomeIndex + wallet + entry date
+      // This finds the original "open" trade row that should be updated with closed trade data
+      const rowIndex = await this.findRowByMatchingTrade(
+        spreadsheetId, 
+        sheetName, 
+        position.copyTradeWallet.walletAddress,
+        position.conditionId,
+        position.outcomeIndex,
+        position.entryDate
+      );
 
       if (rowIndex === -1) {
-        console.warn(`⚠️  Could not find row for position ${positionId} in spreadsheet`);
+        console.warn(`⚠️  Could not find matching open row for position ${positionId} in spreadsheet`);
         return;
       }
 
       // Update specific cells
       const updates: any[] = [];
 
+      // Column mapping: L=ExitDate, M=ExitPrice, N=SharesSold, O=RealizedPnL, P=PercentPnL, Q=FinalValue, S=Status
       if (data.exitDate !== undefined) {
         updates.push({
-          range: `${sheetName}!J${rowIndex}`,
+          range: `${sheetName}!L${rowIndex}`, // Column L: Exit Date
           values: [[this.formatDateTime(data.exitDate)]],
         });
       }
 
       if (data.exitPrice !== undefined) {
         updates.push({
-          range: `${sheetName}!K${rowIndex}`,
+          range: `${sheetName}!M${rowIndex}`, // Column M: Exit Price
           values: [[parseFloat(data.exitPrice.toString()).toFixed(4)]],
         });
       }
 
       if (data.sharesSold !== undefined) {
         updates.push({
-          range: `${sheetName}!L${rowIndex}`,
+          range: `${sheetName}!N${rowIndex}`, // Column N: Shares Sold
           values: [[parseFloat(data.sharesSold.toString()).toFixed(2)]],
         });
       }
 
       if (data.realizedPnl !== undefined) {
         updates.push({
-          range: `${sheetName}!M${rowIndex}`,
+          range: `${sheetName}!O${rowIndex}`, // Column O: Realized PnL
           values: [[parseFloat(data.realizedPnl.toString()).toFixed(2)]],
         });
       }
 
       if (data.percentPnl !== undefined) {
         updates.push({
-          range: `${sheetName}!N${rowIndex}`,
+          range: `${sheetName}!P${rowIndex}`, // Column P: Percent PnL
           values: [[`${data.percentPnl.toFixed(2)}%`]],
         });
-        // Also update ROI (Column P)
+        // Also update ROI (Column R)
         updates.push({
-          range: `${sheetName}!P${rowIndex}`,
+          range: `${sheetName}!R${rowIndex}`, // Column R: ROI (same as Percent PnL)
           values: [[`${data.percentPnl.toFixed(2)}%`]],
         });
       }
 
       if (data.finalValue !== undefined) {
         updates.push({
-          range: `${sheetName}!O${rowIndex}`,
+          range: `${sheetName}!Q${rowIndex}`, // Column Q: Final Value
           values: [[parseFloat(data.finalValue.toString()).toFixed(2)]],
         });
       }
 
       if (data.status !== undefined) {
         updates.push({
-          range: `${sheetName}!Q${rowIndex}`,
+          range: `${sheetName}!S${rowIndex}`, // Column S: Status
           values: [[data.status]],
         });
       }
@@ -1025,12 +1065,18 @@ class GoogleSheetsService {
         });
 
         // Re-apply formulas (they will auto-update)
+        // Column mapping: G=EntryDate, H=EntryPrice, I=SimInvestment, L=ExitDate, M=ExitPrice, N=SharesSold, O=RealizedPnL, P=PercentPnL, Q=FinalValue, R=ROI, T=HoursHeld
         const sheetId = await this.getSheetId(spreadsheetId, sheetName);
-        await this.setCellFormula(spreadsheetId, sheetId, `M${rowIndex}`, `=IF(OR(ISBLANK(K${rowIndex}), ISBLANK(G${rowIndex}), ISBLANK(L${rowIndex})), "", (K${rowIndex} - G${rowIndex}) * L${rowIndex})`);
-        await this.setCellFormula(spreadsheetId, sheetId, `N${rowIndex}`, `=IF(OR(ISBLANK(M${rowIndex}), ISBLANK(H${rowIndex})), "", (M${rowIndex} / H${rowIndex}) * 100)`);
-        await this.setCellFormula(spreadsheetId, sheetId, `O${rowIndex}`, `=IF(ISBLANK(M${rowIndex}), H${rowIndex}, H${rowIndex} + M${rowIndex})`);
-        await this.setCellFormula(spreadsheetId, sheetId, `P${rowIndex}`, `=IF(ISBLANK(N${rowIndex}), "", N${rowIndex})`);
-        await this.setCellFormula(spreadsheetId, sheetId, `R${rowIndex}`, `=IF(ISBLANK(J${rowIndex}), "", (J${rowIndex} - F${rowIndex}) * 24)`);
+        // Realized PnL (O) = (Exit Price (M) - Entry Price (H)) * Shares Sold (N)
+        await this.setCellFormula(spreadsheetId, sheetId, `O${rowIndex}`, `=IF(OR(ISBLANK(M${rowIndex}), ISBLANK(H${rowIndex}), ISBLANK(N${rowIndex})), "", (M${rowIndex} - H${rowIndex}) * N${rowIndex})`);
+        // Percent PnL (P) = (Realized PnL (O) / Simulated Investment (I)) * 100
+        await this.setCellFormula(spreadsheetId, sheetId, `P${rowIndex}`, `=IF(OR(ISBLANK(O${rowIndex}), ISBLANK(I${rowIndex})), "", (O${rowIndex} / I${rowIndex}) * 100)`);
+        // Final Value (Q) = Simulated Investment (I) + Realized PnL (O)
+        await this.setCellFormula(spreadsheetId, sheetId, `Q${rowIndex}`, `=IF(ISBLANK(O${rowIndex}), I${rowIndex}, I${rowIndex} + O${rowIndex})`);
+        // ROI (R) = Same as Percent PnL (P)
+        await this.setCellFormula(spreadsheetId, sheetId, `R${rowIndex}`, `=IF(ISBLANK(P${rowIndex}), "", P${rowIndex})`);
+        // Hours Held (T) = (Exit Date (L) - Entry Date (G)) * 24
+        await this.setCellFormula(spreadsheetId, sheetId, `T${rowIndex}`, `=IF(ISBLANK(L${rowIndex}), "", (L${rowIndex} - G${rowIndex}) * 24)`);
 
         // Update conditional formatting
         await this.applyConditionalFormatting(spreadsheetId, sheetId, rowIndex);
@@ -1044,36 +1090,56 @@ class GoogleSheetsService {
   }
 
   /**
-   * Find row index by position ID or wallet + entry date
+   * Find row index by matching trade criteria (wallet, conditionId, outcomeIndex, entry date)
+   * Finds the original "open" trade row that should be updated with closed trade data
    */
-  private async findRowByPositionId(
+  private async findRowByMatchingTrade(
     spreadsheetId: string,
     sheetName: string,
-    positionId: string,
     walletAddress: string,
+    conditionId: string | undefined,
+    outcomeIndex: number | undefined,
     entryDate: Date
   ): Promise<number> {
     try {
-      // Get all rows
+      // Get all rows - we need wallet (A), outcome (D), market (E), entry date (G), and status (S) to match
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId,
-        range: `${sheetName}!A:F`, // Get columns A-F (wallet, name, sub, outcome, realized, entry date)
+        range: `${sheetName}!A:U`, // Get all columns to check status and exit fields
       });
 
       const rows = response.data.values || [];
       const entryDateTime = this.formatDateTime(entryDate);
 
       // Find matching row (skip header row)
+      // Match by: wallet address, entry date, and empty exit fields (indicating it's the open row)
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
-        if (row[0] === walletAddress && row[5] === entryDateTime) {
+        const rowWallet = row[0]; // Column A: Wallet Address
+        const rowEntryDate = row[6]; // Column G: Entry Date/Time
+        const rowExitDate = row[11]; // Column L: Exit Date (empty for open trades)
+        const rowStatus = row[18]; // Column S: Status
+        
+        // Match wallet address and entry date
+        if (rowWallet === walletAddress && rowEntryDate === entryDateTime) {
+          // Prefer rows with empty exit date (open trades) or status "open"
+          if (!rowExitDate || rowStatus === "open" || rowStatus === "") {
+            return i + 1; // Return 1-based row index
+          }
+        }
+      }
+
+      // If no exact match with empty exit, find by wallet + entry date (fallback)
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (row[0] === walletAddress && row[6] === entryDateTime) {
           return i + 1; // Return 1-based row index
         }
       }
 
       return -1;
     } catch (error) {
-      console.error("Error finding row:", error);
+      console.error("Error finding matching trade row:", error);
       return -1;
     }
   }

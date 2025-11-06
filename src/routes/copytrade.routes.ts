@@ -3,12 +3,15 @@ import { AppDataSource } from "../config/database.js";
 import { CopyTradeWallet } from "../entities/CopyTradeWallet.js";
 import { CopyTradePosition } from "../entities/CopyTradePosition.js";
 import { TrackedWhale } from "../entities/TrackedWhale.js";
+import { WhaleActivity } from "../entities/WhaleActivity.js";
 import { googleSheetsService } from "../services/google-sheets.service.js";
+import { IsNull, In } from "typeorm";
 
 const router = Router();
 const copytradeWalletRepository = AppDataSource.getRepository(CopyTradeWallet);
 const copytradePositionRepository = AppDataSource.getRepository(CopyTradePosition);
 const whaleRepository = AppDataSource.getRepository(TrackedWhale);
+const activityRepository = AppDataSource.getRepository(WhaleActivity);
 
 /**
  * @swagger
@@ -35,7 +38,9 @@ const whaleRepository = AppDataSource.getRepository(TrackedWhale);
 router.get("/wallets", async (req: Request, res: Response) => {
   try {
     const { isActive } = req.query;
-    const where: any = {};
+    const where: any = {
+      trackedWhaleId: IsNull(), // Exclude virtual wallets created for tracked whales
+    };
     
     if (isActive !== undefined) {
       where.isActive = isActive === "true";
@@ -116,17 +121,32 @@ router.post("/wallets", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "subscriptionType must be 'free' or 'paid'" });
     }
 
-    // Check if wallet already exists
-    const existing = await copytradeWalletRepository.findOne({
-      where: { walletAddress },
-    });
+    // Normalize wallet address to lowercase for comparison (Ethereum addresses are case-insensitive)
+    const normalizedAddress = walletAddress.toLowerCase().trim();
 
-    if (existing) {
-      return res.status(409).json({ error: "Wallet already exists in copytrade" });
+    // Check if wallet already exists in copytrade wallets (case-insensitive comparison)
+    const existingCopytradeWallet = await copytradeWalletRepository
+      .createQueryBuilder("wallet")
+      .where("LOWER(wallet.walletAddress) = LOWER(:address)", { address: normalizedAddress })
+      .getOne();
+
+    if (existingCopytradeWallet) {
+      return res.status(409).json({ error: "Wallet address already exists in copytrade wallets" });
+    }
+
+    // Check if wallet already exists in tracked whales with isCopytrade = true (case-insensitive comparison)
+    const existingWhaleInCopytrade = await whaleRepository
+      .createQueryBuilder("whale")
+      .where("LOWER(whale.walletAddress) = LOWER(:address)", { address: normalizedAddress })
+      .andWhere("whale.isCopytrade = :isCopytrade", { isCopytrade: true })
+      .getOne();
+
+    if (existingWhaleInCopytrade) {
+      return res.status(409).json({ error: "Wallet address already exists in tracked whales in copytrade" });
     }
 
     const wallet = copytradeWalletRepository.create({
-      walletAddress,
+      walletAddress: normalizedAddress,
       label,
       subscriptionType,
       simulatedInvestment: parseFloat(simulatedInvestment) || 500,
@@ -323,6 +343,37 @@ router.post("/whales/:whaleId", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Whale not found" });
     }
 
+    // Normalize whale wallet address for case-insensitive comparison
+    const normalizedWhaleAddress = whale.walletAddress.toLowerCase().trim();
+
+    // Check if this whale's wallet address already exists in copytrade wallets (case-insensitive comparison)
+    // Exclude virtual wallets (those with trackedWhaleId set) - they will be recreated if needed
+    const existingCopytradeWallet = await copytradeWalletRepository
+      .createQueryBuilder("wallet")
+      .where("LOWER(wallet.walletAddress) = LOWER(:address)", { address: normalizedWhaleAddress })
+      .andWhere("wallet.trackedWhaleId IS NULL") // Only check copytrade-only wallets, not virtual wallets
+      .getOne();
+
+    if (existingCopytradeWallet) {
+      return res.status(409).json({ error: "Wallet address already exists in copytrade wallets" });
+    }
+
+    // Check if there's an existing virtual wallet for this whale (shouldn't exist if properly removed)
+    // If it exists, delete it first so we can recreate it
+    const existingVirtualWallet = await copytradeWalletRepository.findOne({
+      where: { trackedWhaleId: whaleId },
+    });
+
+    if (existingVirtualWallet) {
+      await copytradeWalletRepository.remove(existingVirtualWallet);
+      console.log(`🗑️  Removed stale virtual wallet before re-adding whale to copytrade: ${whale.label || whale.walletAddress}`);
+    }
+
+    // Check if whale is already in copytrade
+    if (whale.isCopytrade) {
+      return res.status(409).json({ error: "Whale is already in copytrade" });
+    }
+
     whale.isCopytrade = true;
     whale.copytradeInvestment = parseFloat(copytradeInvestment) || 500;
 
@@ -360,6 +411,16 @@ router.delete("/whales/:whaleId", async (req: Request, res: Response) => {
 
     if (!whale) {
       return res.status(404).json({ error: "Whale not found" });
+    }
+
+    // Find and delete the virtual CopyTradeWallet for this whale
+    const virtualWallet = await copytradeWalletRepository.findOne({
+      where: { trackedWhaleId: whaleId },
+    });
+
+    if (virtualWallet) {
+      await copytradeWalletRepository.remove(virtualWallet);
+      console.log(`🗑️  Deleted virtual CopyTradeWallet for whale: ${whale.label || whale.walletAddress}`);
     }
 
     whale.isCopytrade = false;
@@ -402,26 +463,237 @@ router.delete("/whales/:whaleId", async (req: Request, res: Response) => {
  */
 router.get("/positions", async (req: Request, res: Response) => {
   try {
-    const { walletId, status, limit = "100" } = req.query;
+    const { walletId, status, limit = "100", offset = "0" } = req.query;
 
     const queryBuilder = copytradePositionRepository
       .createQueryBuilder("position")
       .leftJoinAndSelect("position.copyTradeWallet", "wallet")
       .orderBy("position.entryDate", "DESC")
-      .take(parseInt(limit as string));
+      .take(parseInt(limit as string))
+      .skip(parseInt(offset as string));
 
     if (walletId) {
       queryBuilder.andWhere("position.copyTradeWalletId = :walletId", { walletId });
     }
 
+    // By default, only show "open" and "closed" positions (exclude "added" if any exist)
     if (status) {
       queryBuilder.andWhere("position.status = :status", { status });
+    } else {
+      // Default: only show open and closed positions (not "added" which are tracked separately)
+      queryBuilder.andWhere("position.status IN (:...statuses)", { statuses: ["open", "closed"] });
     }
 
+    // Clone query builder for count (without pagination)
+    const countBuilder = queryBuilder.clone();
+    const total = await countBuilder.getCount();
+    
     const positions = await queryBuilder.getMany();
-    res.json(positions);
+    
+    res.json({
+      positions,
+      pagination: {
+        total,
+        limit: parseInt(limit as string),
+        offset: parseInt(offset as string),
+        hasMore: parseInt(offset as string) + positions.length < total,
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch copytrade positions", message: String(error) });
+  }
+});
+
+/**
+ * @swagger
+ * /api/copytrade/positions/by-trader:
+ *   get:
+ *     summary: Get positions grouped by trader/wallet
+ *     tags: [CopyTrade]
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *         description: Number of positions per trader to return
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Offset for pagination
+ *     responses:
+ *       200:
+ *         description: Positions grouped by trader
+ */
+router.get("/positions/by-trader", async (req: Request, res: Response) => {
+  try {
+    const { limit = "50", offset = "0" } = req.query;
+
+    // Get all active copytrade-only wallets (exclude virtual wallets for tracked whales)
+    const wallets = await copytradeWalletRepository.find({
+      where: { 
+        isActive: true,
+        trackedWhaleId: IsNull(), // Exclude virtual wallets - they're shown via whales below
+      },
+      relations: ["positions"],
+      order: { createdAt: "DESC" },
+    });
+
+    // Filter positions to only include "open" and "closed" (exclude "added" if any exist)
+    wallets.forEach(wallet => {
+      if (wallet.positions) {
+        wallet.positions = wallet.positions.filter(p => p.status === "open" || p.status === "closed");
+      }
+    });
+
+    // Get tracked whales in copytrade
+    const whalesInCopytrade = await whaleRepository.find({
+      where: { isCopytrade: true, isActive: true },
+    });
+
+    // For each whale, get their virtual wallet
+    const whaleWallets = await Promise.all(
+      whalesInCopytrade.map(async (whale) => {
+        const wallet = await copytradeWalletRepository.findOne({
+          where: { trackedWhaleId: whale.id },
+        });
+        if (wallet) {
+          // Only get "open" and "closed" positions (exclude "added" if any exist)
+          const positions = await copytradePositionRepository.find({
+            where: { 
+              copyTradeWalletId: wallet.id,
+              status: In(["open", "closed"]), // Only show actual positions
+            },
+            order: { entryDate: "DESC" },
+            take: parseInt(limit as string),
+            skip: parseInt(offset as string),
+          });
+          return { wallet, positions };
+        }
+        return null;
+      })
+    );
+
+    const traders = wallets.map((wallet) => ({
+      walletId: wallet.id,
+      walletAddress: wallet.walletAddress,
+      label: wallet.label || wallet.walletAddress.slice(0, 8),
+      subscriptionType: wallet.subscriptionType,
+      isWhale: !!wallet.trackedWhaleId,
+      positions: wallet.positions.slice(
+        parseInt(offset as string),
+        parseInt(offset as string) + parseInt(limit as string)
+      ),
+    })).filter(t => t.positions.length > 0);
+
+    // Add whale wallets
+    whaleWallets.forEach((whaleWallet) => {
+      if (whaleWallet && whaleWallet.positions.length > 0) {
+        traders.push({
+          walletId: whaleWallet.wallet.id,
+          walletAddress: whaleWallet.wallet.walletAddress,
+          label: whaleWallet.wallet.label || whaleWallet.wallet.walletAddress.slice(0, 8),
+          subscriptionType: whaleWallet.wallet.subscriptionType,
+          isWhale: true,
+          positions: whaleWallet.positions,
+        });
+      }
+    });
+
+    res.json({ traders });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch positions by trader", message: String(error) });
+  }
+});
+
+/**
+ * @swagger
+ * /api/copytrade/positions/grouped/{walletId}:
+ *   get:
+ *     summary: Get positions grouped by position group for a specific trader
+ *     tags: [CopyTrade]
+ *     parameters:
+ *       - in: path
+ *         name: walletId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Positions grouped by position group
+ */
+router.get("/positions/grouped/:walletId", async (req: Request, res: Response) => {
+  try {
+    const { walletId } = req.params;
+
+    // Only get "open" and "closed" positions (exclude "added" if any exist)
+    const positions = await copytradePositionRepository.find({
+      where: { 
+        copyTradeWalletId: walletId,
+        status: In(["open", "closed"]), // Only show actual positions
+      },
+      relations: ["copyTradeWallet"],
+      order: { entryDate: "ASC" },
+    });
+
+    // Group positions by conditionId + outcomeIndex + entryDate (position group)
+    const groupedPositions = new Map<string, typeof positions>();
+
+    positions.forEach((position) => {
+      if (position.conditionId && position.outcomeIndex !== undefined) {
+        // Find the original open position for this group
+        const openPosition = positions.find(
+          (p) =>
+            p.conditionId === position.conditionId &&
+            p.outcomeIndex === position.outcomeIndex &&
+            p.status === "open" &&
+            p.entryDate <= position.entryDate
+        );
+
+        const groupKey = openPosition
+          ? `${position.conditionId}-${position.outcomeIndex}-${openPosition.entryDate.toISOString()}`
+          : `${position.conditionId}-${position.outcomeIndex}-${position.entryDate.toISOString()}`;
+
+        if (!groupedPositions.has(groupKey)) {
+          groupedPositions.set(groupKey, []);
+        }
+        groupedPositions.get(groupKey)!.push(position);
+      } else {
+        // Positions without conditionId/outcomeIndex are standalone
+        const standaloneKey = `standalone-${position.id}`;
+        groupedPositions.set(standaloneKey, [position]);
+      }
+    });
+
+    // Convert to array format with hierarchy
+    const grouped = Array.from(groupedPositions.entries()).map(([groupKey, groupPositions]) => {
+      // Sort positions: open first, then by date
+      groupPositions.sort((a, b) => {
+        if (a.status === "open" && b.status !== "open") return -1;
+        if (a.status !== "open" && b.status === "open") return 1;
+        return new Date(a.entryDate).getTime() - new Date(b.entryDate).getTime();
+      });
+
+      // Find the first open position (original)
+      const openPosition = groupPositions.find((p) => p.status === "open");
+      
+      // Only include open and closed positions (ignore "added" and "partially_closed")
+      const closedPositions = groupPositions.filter((p) => p.status === "closed");
+
+      return {
+        groupKey,
+        openPosition,
+        closedPositions,
+        allPositions: groupPositions.filter((p) => p.status === "open" || p.status === "closed"),
+      };
+    });
+
+    res.json({ grouped, wallet: positions[0]?.copyTradeWallet });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch grouped positions", message: String(error) });
   }
 });
 
@@ -497,12 +769,41 @@ router.get("/whales", async (req: Request, res: Response) => {
  */
 router.get("/stats", async (req: Request, res: Response) => {
   try {
-    const totalWallets = await copytradeWalletRepository.count({ where: { isActive: true } });
+    // Count only copytrade-only wallets (exclude virtual wallets for tracked whales)
+    const totalWallets = await copytradeWalletRepository.count({ 
+      where: { 
+        isActive: true,
+        trackedWhaleId: IsNull(), // Exclude virtual wallets
+      },
+    });
     const totalWhales = await whaleRepository.count({ where: { isCopytrade: true, isActive: true } });
     
-    const totalPositions = await copytradePositionRepository.count();
+    // Only count "open" and "closed" positions (actual positions)
+    // "added" buys don't create separate positions - they're tracked separately
     const openPositions = await copytradePositionRepository.count({ where: { status: "open" } });
     const closedPositions = await copytradePositionRepository.count({ where: { status: "closed" } });
+    const totalPositions = openPositions + closedPositions;
+
+    // Count "added" buy trades separately (these are additional buys on existing positions)
+    // Get all whales in copytrade
+    const whalesInCopytrade = await whaleRepository.find({
+      where: { isCopytrade: true, isActive: true },
+      select: ["id"],
+    });
+    
+    const whaleIds = whalesInCopytrade.map(w => w.id);
+    let addedTradesCount = 0;
+    
+    if (whaleIds.length > 0) {
+      // Count "added" BUY trades for whales in copytrade
+      addedTradesCount = await activityRepository.count({
+        where: {
+          whaleId: In(whaleIds),
+          activityType: "POLYMARKET_BUY",
+          status: "added",
+        },
+      });
+    }
 
     const closedPositionsWithPnL = await copytradePositionRepository.find({
       where: { status: "closed" },
@@ -529,6 +830,10 @@ router.get("/stats", async (req: Request, res: Response) => {
         total: totalPositions,
         open: openPositions,
         closed: closedPositions,
+      },
+      addedTrades: {
+        total: addedTradesCount,
+        description: "Additional buys on existing positions (not counted as separate positions)",
       },
       performance: {
         totalInvested: totalInvested,
