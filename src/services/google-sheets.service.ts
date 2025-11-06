@@ -5,6 +5,7 @@ import { CopyTradePosition } from "../entities/CopyTradePosition.js";
 import { CopyTradeWallet } from "../entities/CopyTradeWallet.js";
 import path from "path";
 import fs from "fs";
+import { logCopytradeError, logCopytradeWarning } from "../utils/copytrade-logger.js";
 
 interface SpreadsheetConfig {
   freeSpreadsheetId?: string;
@@ -255,6 +256,13 @@ class GoogleSheetsService {
       return spreadsheetId;
     } catch (error: any) {
       console.error(`❌ Failed to create spreadsheet "${title}":`, error);
+      await logCopytradeError(
+        "Google Sheets - Create Spreadsheet",
+        error,
+        {
+          title,
+        }
+      );
       
       // Provide helpful error messages for common issues
       if (error?.code === 403) {
@@ -499,6 +507,14 @@ class GoogleSheetsService {
         console.log(`   Sheet "${sheetName}" already exists, skipping creation`);
       } else {
         console.error(`   ❌ Failed to setup sheet "${sheetName}":`, error);
+        await logCopytradeError(
+          "Google Sheets - Setup Sheet",
+          error,
+          {
+            sheetName,
+            spreadsheetId,
+          }
+        );
         throw error;
       }
     }
@@ -537,6 +553,14 @@ class GoogleSheetsService {
         throw new Error(`Spreadsheet ${spreadsheetId} not found or not accessible. Check spreadsheet ID and sharing permissions.`);
       }
       console.error(`❌ Failed to check/create trader sheet "${sheetName}":`, error);
+      await logCopytradeError(
+        "Google Sheets - Check/Create Trader Sheet",
+        error,
+        {
+          sheetName,
+          spreadsheetId,
+        }
+      );
       throw error;
     }
   }
@@ -737,6 +761,13 @@ class GoogleSheetsService {
       }
     } catch (error) {
       console.error("❌ Failed to queue position:", error);
+      await logCopytradeError(
+        "Google Sheets - Queue Position",
+        error,
+        {
+          positionData: data,
+        }
+      );
     }
   }
 
@@ -911,6 +942,16 @@ class GoogleSheetsService {
           console.log(`   ✅ Batched ${positions.length} position(s) to Google Sheets (${firstPosition.data.subscriptionType}): ${sheetName}`);
         } catch (error: any) {
           console.error(`❌ Failed to batch write to ${sheetName}:`, error);
+          await logCopytradeError(
+            "Google Sheets - Batch Write",
+            error,
+            {
+              sheetName,
+              subscriptionType: firstPosition.data.subscriptionType,
+              positionCount: positions.length,
+              spreadsheetId: firstPosition.spreadsheetId,
+            }
+          );
           // Don't throw - allow other batches to continue
         }
       }
@@ -985,8 +1026,9 @@ class GoogleSheetsService {
       );
 
       if (rowIndex === -1) {
-        console.warn(`⚠️  Could not find matching open row for position ${positionId} in spreadsheet`);
-        return;
+        const errorMsg = `Could not find matching open row for position ${positionId} in spreadsheet`;
+        console.warn(`⚠️  ${errorMsg}`);
+        throw new Error(errorMsg);
       }
 
       // Update specific cells
@@ -1021,16 +1063,23 @@ class GoogleSheetsService {
         });
       }
 
-      if (data.percentPnl !== undefined) {
-        updates.push({
-          range: `${sheetName}!P${rowIndex}`, // Column P: Percent PnL
-          values: [[`${data.percentPnl.toFixed(2)}%`]],
-        });
-        // Also update ROI (Column R)
-        updates.push({
-          range: `${sheetName}!R${rowIndex}`, // Column R: ROI (same as Percent PnL)
-          values: [[`${data.percentPnl.toFixed(2)}%`]],
-        });
+      if (data.percentPnl !== undefined && data.percentPnl !== null) {
+        // Ensure percentPnl is a number
+        const percentPnlNum = typeof data.percentPnl === 'number' 
+          ? data.percentPnl 
+          : parseFloat(String(data.percentPnl));
+        
+        if (!isNaN(percentPnlNum)) {
+          updates.push({
+            range: `${sheetName}!P${rowIndex}`, // Column P: Percent PnL
+            values: [[`${percentPnlNum.toFixed(2)}%`]],
+          });
+          // Also update ROI (Column R)
+          updates.push({
+            range: `${sheetName}!R${rowIndex}`, // Column R: ROI (same as Percent PnL)
+            values: [[`${percentPnlNum.toFixed(2)}%`]],
+          });
+        }
       }
 
       if (data.finalValue !== undefined) {
@@ -1049,7 +1098,7 @@ class GoogleSheetsService {
 
       if (data.realizedOutcome !== undefined) {
         updates.push({
-          range: `${sheetName}!E${rowIndex}`,
+          range: `${sheetName}!F${rowIndex}`, // Column F: Realized Outcome
           values: [[data.realizedOutcome]],
         });
       }
@@ -1069,8 +1118,8 @@ class GoogleSheetsService {
         const sheetId = await this.getSheetId(spreadsheetId, sheetName);
         // Realized PnL (O) = (Exit Price (M) - Entry Price (H)) * Shares Sold (N)
         await this.setCellFormula(spreadsheetId, sheetId, `O${rowIndex}`, `=IF(OR(ISBLANK(M${rowIndex}), ISBLANK(H${rowIndex}), ISBLANK(N${rowIndex})), "", (M${rowIndex} - H${rowIndex}) * N${rowIndex})`);
-        // Percent PnL (P) = (Realized PnL (O) / Simulated Investment (I)) * 100
-        await this.setCellFormula(spreadsheetId, sheetId, `P${rowIndex}`, `=IF(OR(ISBLANK(O${rowIndex}), ISBLANK(I${rowIndex})), "", (O${rowIndex} / I${rowIndex}) * 100)`);
+        // Percent PnL (P) = (Realized PnL (O) / Cost Basis) * 100, where Cost Basis = Entry Price (H) * Shares Sold (N)
+        await this.setCellFormula(spreadsheetId, sheetId, `P${rowIndex}`, `=IF(OR(ISBLANK(O${rowIndex}), ISBLANK(H${rowIndex}), ISBLANK(N${rowIndex})), "", IF((H${rowIndex} * N${rowIndex}) = 0, "", (O${rowIndex} / (H${rowIndex} * N${rowIndex})) * 100))`);
         // Final Value (Q) = Simulated Investment (I) + Realized PnL (O)
         await this.setCellFormula(spreadsheetId, sheetId, `Q${rowIndex}`, `=IF(ISBLANK(O${rowIndex}), I${rowIndex}, I${rowIndex} + O${rowIndex})`);
         // ROI (R) = Same as Percent PnL (P)
@@ -1085,6 +1134,27 @@ class GoogleSheetsService {
       }
     } catch (error) {
       console.error("❌ Failed to update position in Google Sheets:", error);
+      // Get position again for error logging (in case it wasn't found earlier)
+      let positionForLog: CopyTradePosition | null = null;
+      try {
+        const positionRepository = AppDataSource.getRepository(CopyTradePosition);
+        positionForLog = await positionRepository.findOne({
+          where: { id: positionId },
+          relations: ["copyTradeWallet"],
+        });
+      } catch (e) {
+        // Ignore errors when fetching for logging
+      }
+      await logCopytradeError(
+        "Google Sheets - Update Position",
+        error,
+        {
+          positionId,
+          subscriptionType: positionForLog?.copyTradeWallet?.subscriptionType || "unknown",
+          walletAddress: positionForLog?.copyTradeWallet?.walletAddress || "unknown",
+          updateData: data,
+        }
+      );
       // Don't throw - allow system to continue even if Sheets fails
     }
   }
@@ -1110,6 +1180,9 @@ class GoogleSheetsService {
 
       const rows = response.data.values || [];
       const entryDateTime = this.formatDateTime(entryDate);
+      
+      // Also try parsing the entry date to compare as Date objects (more flexible)
+      const entryDateTimestamp = entryDate.getTime();
 
       // Find matching row (skip header row)
       // Match by: wallet address, entry date, and empty exit fields (indicating it's the open row)
@@ -1120,11 +1193,31 @@ class GoogleSheetsService {
         const rowExitDate = row[11]; // Column L: Exit Date (empty for open trades)
         const rowStatus = row[18]; // Column S: Status
         
-        // Match wallet address and entry date
-        if (rowWallet === walletAddress && rowEntryDate === entryDateTime) {
-          // Prefer rows with empty exit date (open trades) or status "open"
-          if (!rowExitDate || rowStatus === "open" || rowStatus === "") {
-            return i + 1; // Return 1-based row index
+        // Match wallet address first
+        if (rowWallet === walletAddress) {
+          // Try exact string match first
+          if (rowEntryDate === entryDateTime) {
+            // Prefer rows with empty exit date (open trades) or status "open"
+            if (!rowExitDate || rowStatus === "open" || rowStatus === "") {
+              return i + 1; // Return 1-based row index
+            }
+          } else if (rowEntryDate) {
+            // Try parsing the date from spreadsheet and comparing timestamps (within 1 minute tolerance)
+            try {
+              const rowDate = new Date(rowEntryDate);
+              if (!isNaN(rowDate.getTime())) {
+                const timeDiff = Math.abs(rowDate.getTime() - entryDateTimestamp);
+                // Allow up to 60 seconds difference (Google Sheets might round seconds)
+                if (timeDiff < 60000) {
+                  // Prefer rows with empty exit date (open trades) or status "open"
+                  if (!rowExitDate || rowStatus === "open" || rowStatus === "") {
+                    return i + 1; // Return 1-based row index
+                  }
+                }
+              }
+            } catch (e) {
+              // Date parsing failed, continue to next row
+            }
           }
         }
       }
@@ -1132,14 +1225,42 @@ class GoogleSheetsService {
       // If no exact match with empty exit, find by wallet + entry date (fallback)
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
-        if (row[0] === walletAddress && row[6] === entryDateTime) {
-          return i + 1; // Return 1-based row index
+        if (row[0] === walletAddress) {
+          const rowEntryDate = row[6];
+          // Try exact match
+          if (rowEntryDate === entryDateTime) {
+            return i + 1; // Return 1-based row index
+          }
+          // Try date comparison
+          if (rowEntryDate) {
+            try {
+              const rowDate = new Date(rowEntryDate);
+              if (!isNaN(rowDate.getTime())) {
+                const timeDiff = Math.abs(rowDate.getTime() - entryDateTimestamp);
+                if (timeDiff < 60000) { // Within 1 minute
+                  return i + 1; // Return 1-based row index
+                }
+              }
+            } catch (e) {
+              // Date parsing failed, continue
+            }
+          }
         }
       }
 
       return -1;
     } catch (error) {
       console.error("Error finding matching trade row:", error);
+      await logCopytradeError(
+        "Google Sheets - Find Row By Matching Trade",
+        error,
+        {
+          walletAddress,
+          entryDate: entryDate.toISOString(),
+          conditionId: conditionId || "unknown",
+          outcomeIndex: outcomeIndex !== undefined ? outcomeIndex : "unknown",
+        }
+      );
       return -1;
     }
   }

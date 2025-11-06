@@ -10,6 +10,7 @@ import { googleSheetsService } from "./google-sheets.service.js";
 import { detectCategory } from "../utils/category-detector.js";
 import { inferCategoryFromTags } from "../utils/category-from-tags.js";
 import { IsNull, In } from "typeorm";
+import { logCopytradeError } from "../utils/copytrade-logger.js";
 
 interface WhaleFrequencyTracker {
   whaleId: string;
@@ -2614,7 +2615,25 @@ class TradePollingService {
         const proceeds = sharesToSellFromThis * exitPrice;
         const realizedPnl = proceeds - costBasis;
         const percentPnl = (realizedPnl / costBasis) * 100;
-        const finalValue = position.simulatedInvestment + realizedPnl;
+        
+        // Ensure simulatedInvestment is a number for addition (not string concatenation)
+        const simulatedInvestment = typeof position.simulatedInvestment === 'number' 
+          ? position.simulatedInvestment 
+          : parseFloat(String(position.simulatedInvestment));
+        const finalValue = simulatedInvestment + realizedPnl;
+
+        // Determine exit date from trade timestamp
+        let exitDate = new Date(trade.timestamp * 1000);
+        
+        // Ensure exit date is after entry date (cannot be same time)
+        const entryDate = position.entryDate;
+        if (exitDate.getTime() <= entryDate.getTime()) {
+          // Exit date cannot be same as or before entry date - set to entry date + 1 second
+          exitDate = new Date(entryDate.getTime() + 1000);
+          console.log(
+            `   ⚠️  Exit date was same as or before entry date, adjusted to ${exitDate.toISOString()} | Position: ${position.id}`
+          );
+        }
 
         if (remainingShares > 0) {
           // Partial close: update position
@@ -2622,7 +2641,7 @@ class TradePollingService {
           position.sharesSold = sharesToSellFromThis.toString();
           position.sharesBought = remainingShares.toString(); // Update remaining shares
           position.exitPrice = exitPrice.toString();
-          position.exitDate = new Date(trade.timestamp * 1000);
+          position.exitDate = exitDate;
           position.exitTransactionHash = trade.transactionHash;
           position.realizedPnl = realizedPnl.toString();
           position.percentPnl = percentPnl;
@@ -2632,7 +2651,7 @@ class TradePollingService {
           position.status = "closed";
           position.sharesSold = sharesToSellFromThis.toString();
           position.exitPrice = exitPrice.toString();
-          position.exitDate = new Date(trade.timestamp * 1000);
+          position.exitDate = exitDate;
           position.exitTransactionHash = trade.transactionHash;
           position.realizedPnl = realizedPnl.toString();
           position.percentPnl = percentPnl;
@@ -2663,11 +2682,203 @@ class TradePollingService {
             });
           } catch (sheetsError) {
             console.error("⚠️  Failed to update Google Sheets:", sheetsError);
+            await logCopytradeError(
+              "CopyTrade - Update Google Sheets for SELL",
+              sheetsError,
+              {
+                positionId: position.id,
+                whaleId: whale.id,
+                whaleLabel: whale.label || whale.walletAddress,
+                activityId: activity.id,
+                status,
+              }
+            );
           }
         }
       }
     } catch (error) {
       console.error("❌ Error handling copytrade SELL:", error);
+      await logCopytradeError(
+        "CopyTrade - Handle SELL",
+        error,
+        {
+          whaleId: whale.id,
+          whaleLabel: whale.label || whale.walletAddress,
+          activityId: activity.id,
+          tradeConditionId: trade.conditionId,
+          tradeOutcomeIndex: trade.outcomeIndex,
+          status,
+        }
+      );
+    }
+  }
+
+  /**
+   * Handle copy trading when a fully closed position is detected (from checkFullyClosedPositions)
+   * This closes copy trade positions and updates the spreadsheet
+   */
+  private async handleCopytradeClosedPosition(
+    whale: TrackedWhale,
+    openBuyActivity: WhaleActivity,
+    closedPosition: any,
+    exitPrice: number
+  ): Promise<void> {
+    try {
+      const conditionId = openBuyActivity.metadata?.conditionId;
+      const outcomeIndex = openBuyActivity.metadata?.outcomeIndex;
+      
+      if (!conditionId || outcomeIndex === undefined) {
+        console.log(`   ⚠️  Missing conditionId or outcomeIndex for closed position | Activity: ${openBuyActivity.id}`);
+        return;
+      }
+
+      // Find or create CopyTradeWallet for this tracked whale
+      let copytradeWallet = await this.copytradeWalletRepository.findOne({
+        where: { trackedWhaleId: whale.id },
+      });
+
+      if (!copytradeWallet) {
+        // Create a virtual CopyTradeWallet for this tracked whale
+        const investment = whale.copytradeInvestment || 500;
+        copytradeWallet = this.copytradeWalletRepository.create({
+          walletAddress: whale.walletAddress,
+          label: whale.label || `Whale: ${whale.walletAddress.slice(0, 8)}`,
+          subscriptionType: whale.subscriptionType || "free",
+          simulatedInvestment: investment,
+          durationHours: 24,
+          partialClosePercentage: 100, // Default 100%
+          isActive: true,
+          trackedWhaleId: whale.id,
+        });
+        copytradeWallet = await this.copytradeWalletRepository.save(copytradeWallet);
+      }
+
+      // Find all open copytrade positions for this market/outcome (FIFO order)
+      const openPositions = await this.copytradePositionRepository.find({
+        where: {
+          copyTradeWalletId: copytradeWallet.id,
+          conditionId: conditionId,
+          outcomeIndex: outcomeIndex,
+          status: "open",
+        },
+        order: {
+          entryDate: "ASC", // FIFO: oldest first
+        },
+      });
+
+      if (openPositions.length === 0) {
+        console.log(
+          `   ⚠️  No open copytrade positions found for closed position | Whale: ${whale.label || whale.walletAddress} | ConditionId: ${conditionId}`
+        );
+        return;
+      }
+
+      // Calculate total shares we have in open positions for this market/outcome
+      const totalOurShares = openPositions.reduce((sum, pos) => sum + parseFloat(pos.sharesBought), 0);
+      
+      // Fully closed: sell all our shares
+      let remainingSharesToSell = totalOurShares;
+
+      // Apply FIFO: sell from oldest positions first
+      for (const position of openPositions) {
+        if (remainingSharesToSell <= 0) break;
+
+        const positionShares = parseFloat(position.sharesBought);
+        const sharesToSellFromThis = Math.min(remainingSharesToSell, positionShares);
+
+        // Calculate PnL for this position
+        const entryPrice = parseFloat(position.entryPrice);
+        const costBasis = sharesToSellFromThis * entryPrice;
+        const proceeds = sharesToSellFromThis * exitPrice;
+        const realizedPnl = proceeds - costBasis;
+        const percentPnl = (realizedPnl / costBasis) * 100;
+        
+        // Ensure simulatedInvestment is a number for addition (not string concatenation)
+        const simulatedInvestment = typeof position.simulatedInvestment === 'number' 
+          ? position.simulatedInvestment 
+          : parseFloat(String(position.simulatedInvestment));
+        const finalValue = simulatedInvestment + realizedPnl;
+
+        // Determine exit date: use current time
+        // Ensure exit date is after entry date (cannot be same time)
+        let exitDate = new Date();
+        
+        // Ensure exit date is after entry date (add at least 1 second if they're the same)
+        const entryDate = position.entryDate;
+        if (exitDate.getTime() <= entryDate.getTime()) {
+          // Exit date cannot be same as or before entry date - set to entry date + 1 second
+          exitDate = new Date(entryDate.getTime() + 1000);
+          console.log(
+            `   ⚠️  Exit date was same as or before entry date, adjusted to ${exitDate.toISOString()} | Position: ${position.id}`
+          );
+        }
+
+        // Full close: mark as closed
+        position.status = "closed";
+        position.sharesSold = sharesToSellFromThis.toString();
+        position.exitPrice = exitPrice.toString();
+        position.exitDate = exitDate;
+        position.exitTransactionHash = openBuyActivity.transactionHash;
+        position.realizedPnl = realizedPnl.toString();
+        position.percentPnl = percentPnl;
+        position.finalValue = finalValue;
+        
+        // Set realized outcome from closed position
+        if (openBuyActivity.metadata?.realizedOutcome) {
+          position.realizedOutcome = openBuyActivity.metadata.realizedOutcome;
+        }
+
+        await this.copytradePositionRepository.save(position);
+        remainingSharesToSell -= sharesToSellFromThis;
+
+        console.log(
+          `   📊 Updated copytrade position (closed) for ${whale.label || whale.walletAddress}: ` +
+          `Sold ${sharesToSellFromThis.toFixed(2)} shares @ $${exitPrice.toFixed(4)} | ` +
+          `PnL: $${realizedPnl.toFixed(2)} (${percentPnl.toFixed(2)}%) | Market: ${openBuyActivity.metadata?.market || conditionId}`
+        );
+
+        // Update Google Sheets for fully closed positions
+        try {
+          await googleSheetsService.updatePosition(position.id, {
+            exitDate: position.exitDate,
+            exitPrice: position.exitPrice,
+            sharesSold: position.sharesSold,
+            realizedPnl: position.realizedPnl,
+            percentPnl: position.percentPnl,
+            finalValue: position.finalValue,
+            status: position.status,
+            realizedOutcome: position.realizedOutcome,
+          });
+          console.log(`   ✅ Updated Google Sheets for closed position | Position: ${position.id}`);
+        } catch (sheetsError) {
+          console.error(`   ⚠️  Failed to update Google Sheets for position ${position.id}:`, sheetsError);
+          await logCopytradeError(
+            "CopyTrade - Update Google Sheets for Closed Position",
+            sheetsError,
+            {
+              positionId: position.id,
+              whaleId: whale.id,
+              whaleLabel: whale.label || whale.walletAddress,
+              conditionId,
+              outcomeIndex,
+            }
+          );
+        }
+      }
+    } catch (error) {
+      console.error(`   ❌ Error handling copytrade closed position:`, error);
+      await logCopytradeError(
+        "CopyTrade - Handle Closed Position",
+        error,
+        {
+          whaleId: whale.id,
+          whaleLabel: whale.label || whale.walletAddress,
+          activityId: openBuyActivity.id,
+          conditionId: openBuyActivity.metadata?.conditionId,
+          outcomeIndex: openBuyActivity.metadata?.outcomeIndex,
+          exitPrice,
+        }
+      );
     }
   }
 
@@ -2773,9 +2984,33 @@ class TradePollingService {
         });
       } catch (sheetsError) {
         console.error("⚠️  Failed to update Google Sheets for copytrade position:", sheetsError);
+        await logCopytradeError(
+          "CopyTrade - Update Google Sheets for New Position",
+          sheetsError,
+          {
+            whaleId: whale.id,
+            whaleLabel: whale.label || whale.walletAddress,
+            activityId: activity.id,
+            tradeConditionId: trade.conditionId,
+            tradeOutcomeIndex: trade.outcomeIndex,
+            status,
+          }
+        );
       }
     } catch (error) {
       console.error("❌ Error creating copytrade position:", error);
+      await logCopytradeError(
+        "CopyTrade - Create Position",
+        error,
+        {
+          whaleId: whale.id,
+          whaleLabel: whale.label || whale.walletAddress,
+          activityId: activity.id,
+          tradeConditionId: trade.conditionId,
+          tradeOutcomeIndex: trade.outcomeIndex,
+          status,
+        }
+      );
     }
   }
 
@@ -2838,9 +3073,29 @@ class TradePollingService {
         });
       } catch (sheetsError) {
         console.error("⚠️  Failed to update Google Sheets for copytrade position:", sheetsError);
+        await logCopytradeError(
+          "CopyTrade - Update Google Sheets for Wallet Position",
+          sheetsError,
+          {
+            walletId: wallet.id,
+            walletLabel: wallet.label || wallet.walletAddress,
+            tradeConditionId: trade.conditionId,
+            tradeOutcomeIndex: trade.outcomeIndex,
+          }
+        );
       }
     } catch (error) {
       console.error("❌ Error creating copytrade position for wallet:", error);
+      await logCopytradeError(
+        "CopyTrade - Create Position for Wallet",
+        error,
+        {
+          walletId: wallet.id,
+          walletLabel: wallet.label || wallet.walletAddress,
+          tradeConditionId: trade.conditionId,
+          tradeOutcomeIndex: trade.outcomeIndex,
+        }
+      );
     }
   }
 
@@ -3103,6 +3358,12 @@ class TradePollingService {
           }
           
           console.log(`   ✅ Updated open BUY trade status to closed in database | Activity: ${openBuyTrade.id}`);
+          
+          // Handle copy trading for closed position if whale has copytrade enabled
+          if (whale.isCopytrade) {
+            console.log(`   📊 CopyTrade: Processing closed position detected for ${whale.label || whale.walletAddress} | Market: ${tradeMetadata.market || conditionId}`);
+            await this.handleCopytradeClosedPosition(whale, openBuyTrade, closedPosition, calculatedExitPrice);
+          }
         }
       }
     } catch (error) {

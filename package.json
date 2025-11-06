@@ -20,7 +20,8 @@
     "discover-arbitrage": "tsx src/scripts/discover-arbitrage.ts",
     "migrate-whale-categories": "tsx src/scripts/migrate-whale-categories.ts",
     "update-activity-categories": "tsx src/scripts/update-activity-categories.ts",
-    "fix-buy-trade-statuses": "tsx src/scripts/fix-buy-trade-statuses.ts"
+    "fix-buy-trade-statuses": "tsx src/scripts/fix-buy-trade-statuses.ts",
+    "update-closed-positions": "tsx src/scripts/update-closed-positions.ts"
   },
   "keywords": [],
   "author": "",

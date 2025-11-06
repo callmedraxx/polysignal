@@ -682,10 +682,14 @@ router.get("/positions/grouped/:walletId", async (req: Request, res: Response) =
       
       // Only include open and closed positions (ignore "added" and "partially_closed")
       const closedPositions = groupPositions.filter((p) => p.status === "closed");
+      
+      // If no open position but there are closed positions, use the first closed position as the main position
+      const mainPosition = openPosition || (closedPositions.length > 0 ? closedPositions[0] : null);
 
       return {
         groupKey,
-        openPosition,
+        openPosition: openPosition || null,
+        mainPosition, // Main position to display (open if exists, otherwise first closed)
         closedPositions,
         allPositions: groupPositions.filter((p) => p.status === "open" || p.status === "closed"),
       };

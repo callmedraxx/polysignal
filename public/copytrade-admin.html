@@ -628,8 +628,11 @@
 
         function formatPercent(value) {
             if (value === null || value === undefined) return '-';
-            const sign = value >= 0 ? '+' : '';
-            return `${sign}${value.toFixed(2)}%`;
+            // Ensure value is a number
+            const numValue = typeof value === 'number' ? value : parseFloat(String(value));
+            if (isNaN(numValue)) return '-';
+            const sign = numValue >= 0 ? '+' : '';
+            return `${sign}${numValue.toFixed(2)}%`;
         }
 
         // Load statistics
@@ -911,7 +914,12 @@
                 
                 document.getElementById('positionsTableBody').innerHTML = positions.map(pos => {
                     const pnl = parseFloat(pos.realizedPnl || 0);
-                    const percentPnl = pos.percentPnl || 0;
+                    // Ensure percentPnl is a number
+                    const percentPnl = typeof pos.percentPnl === 'number' 
+                        ? pos.percentPnl 
+                        : (pos.percentPnl !== null && pos.percentPnl !== undefined) 
+                            ? parseFloat(String(pos.percentPnl)) 
+                            : 0;
                     const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
                     
                     return `
@@ -1050,11 +1058,13 @@
                 document.getElementById('traderPositionsContainer').innerHTML = grouped.map((group, index) => {
                     let html = `<div style="margin-bottom: 30px; border: 2px solid #e9ecef; border-radius: 8px; padding: 20px; background: #f8f9fa;">`;
                     
-                    // Open position (if exists)
-                    if (group.openPosition) {
-                        const pos = group.openPosition;
-                        const isClosed = group.closedPositions && group.closedPositions.length > 0;
-                        const closedPos = isClosed ? group.closedPositions[0] : null;
+                    // Main position (open if exists, otherwise first closed)
+                    const mainPos = group.mainPosition || group.openPosition;
+                    if (mainPos) {
+                        const isClosed = mainPos.status === 'closed' || (group.closedPositions && group.closedPositions.length > 0);
+                        const closedPos = isClosed && group.closedPositions && group.closedPositions.length > 0 
+                            ? group.closedPositions[0] 
+                            : (mainPos.status === 'closed' ? mainPos : null);
                         
                         html += `
                             <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid ${isClosed ? '#e74c3c' : '#27ae60'};">
@@ -1063,20 +1073,21 @@
                                         <strong style="color: ${isClosed ? '#e74c3c' : '#27ae60'}; font-size: 1.1em;">
                                             ${isClosed ? '✅ Closed Position' : '📊 Open Position'}
                                         </strong>
-                                        <p style="margin: 5px 0; color: #666;"><strong>Market:</strong> ${pos.marketName || 'N/A'}</p>
-                                        <p style="margin: 5px 0; color: #666;"><strong>Outcome:</strong> ${pos.outcome || 'N/A'}</p>
+                                        <p style="margin: 5px 0; color: #666;"><strong>Market:</strong> ${mainPos.marketName || 'N/A'}</p>
+                                        <p style="margin: 5px 0; color: #666;"><strong>Outcome:</strong> ${mainPos.realizedOutcome || mainPos.outcome || 'N/A'}</p>
                                     </div>
                                     <span class="badge badge-${isClosed ? 'active' : 'active'}">${isClosed ? 'CLOSED' : 'OPEN'}</span>
                                 </div>
                                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px;">
-                                    <div><strong>Entry:</strong> $${parseFloat(pos.entryPrice).toFixed(4)}<br><small>${new Date(pos.entryDate).toLocaleDateString()}</small></div>
-                                    <div><strong>Investment:</strong> ${formatCurrency(parseFloat(pos.simulatedInvestment))}</div>
-                                    <div><strong>Shares:</strong> ${parseFloat(pos.sharesBought).toFixed(2)}</div>
+                                    <div><strong>Entry:</strong> $${parseFloat(mainPos.entryPrice).toFixed(4)}<br><small>${new Date(mainPos.entryDate).toLocaleDateString()}</small></div>
+                                    <div><strong>Investment:</strong> ${formatCurrency(parseFloat(mainPos.simulatedInvestment))}</div>
+                                    <div><strong>Shares:</strong> ${parseFloat(mainPos.sharesBought).toFixed(2)}</div>
                                     ${isClosed && closedPos ? `
                                         <div><strong>Exit:</strong> $${parseFloat(closedPos.exitPrice || 0).toFixed(4)}<br><small>${closedPos.exitDate ? new Date(closedPos.exitDate).toLocaleDateString() : '-'}</small></div>
                                         <div class="${parseFloat(closedPos.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}"><strong>PnL:</strong> ${formatCurrency(parseFloat(closedPos.realizedPnl || 0))}</div>
-                                        <div class="${parseFloat(closedPos.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}"><strong>% PnL:</strong> ${formatPercent(closedPos.percentPnl || 0)}</div>
+                                        <div class="${parseFloat(closedPos.realizedPnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative'}"><strong>% PnL:</strong> ${formatPercent(closedPos.percentPnl)}</div>
                                         ${closedPos.finalValue ? `<div><strong>Final Value:</strong> ${formatCurrency(parseFloat(closedPos.finalValue))}</div>` : ''}
+                                        ${closedPos.realizedOutcome ? `<div><strong>Realized Outcome:</strong> ${closedPos.realizedOutcome}</div>` : ''}
                                     ` : ''}
                                 </div>
                             </div>
