@@ -1200,6 +1200,13 @@ class TradePollingService {
         
         // If we found a matching trade, reply to it; otherwise send new message
         let messageId: string | null = null;
+        const hasParentMessage = Boolean(matchingActivity?.discordMessageId);
+        const isClosedSell =
+          activity.activityType === "POLYMARKET_SELL" && activity.status === "closed";
+        const isPartiallyClosed = activity.status === "partially_closed";
+        const isClosed = activity.status === "closed";
+        const isInitialBuy = activity.activityType === "POLYMARKET_BUY" && activity.status === "open";
+
         if (matchingActivity && matchingActivity.discordMessageId) {
           // Reply to existing message
           const embed = discordService.buildWhaleAlertEmbed(alertData, whale.category || "regular");
@@ -1217,7 +1224,29 @@ class TradePollingService {
             );
           }
         } else {
-          // Send new alert
+          // Additional safety check: partially_closed should NEVER be sent for regular category
+          // (This should already be caught by the check above, but adding for extra safety)
+          if (isPartiallyClosed && whaleCategory !== "whale") {
+            console.log(
+              `⏭️  Skipping Discord notification for partially_closed (only allowed for whale category) | Whale: ${
+                whale.label || whale.walletAddress
+              } | Activity: ${activity.id}`
+            );
+            continue;
+          }
+          
+          // Only initial buy messages can be sent without a parent message
+          // Partially closed and fully closed positions MUST have a matching opening initial buy message
+          if ((isPartiallyClosed || isClosed) && !hasParentMessage) {
+            console.log(
+              `⏭️  Skipping Discord notification for ${activity.status} position (no parent initial buy message found) | Whale: ${
+                whale.label || whale.walletAddress
+              } | Activity: ${activity.id}`
+            );
+            continue;
+          }
+
+          // Send new alert (only for initial buys at this point)
           messageId = await discordService.sendWhaleAlert(alertData);
           
           if (messageId) {
@@ -1744,12 +1773,6 @@ class TradePollingService {
           
           const wasNotClosed = activity.status !== "closed";
           
-          // Check if this activity was already processed by checkFullyClosedPositions BEFORE we update metadata
-          // This prevents duplicate alerts for the same closed position
-          const activityMetadata = activity.metadata || {};
-          // Check both exitPrice and gainzAlertSent flag to prevent duplicates
-          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined || activityMetadata.gainzAlertSent === true;
-          
           // Calculate exit price using formula: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
           const totalCost = closedPosition.totalBought * closedPosition.avgPrice;
           const calculatedExitPrice = closedPosition.totalBought > 0 && closedPosition.realizedPnl !== undefined
@@ -1794,20 +1817,8 @@ class TradePollingService {
             updated = true;
           }
           
-          // Note: Gainz alerts are sent from checkFullyClosedPositions to avoid duplicates
-          // Only send gainz alert here if this activity wasn't handled by checkFullyClosedPositions
-          // (i.e., if it was already closed before checkFullyClosedPositions ran)
-          // This prevents duplicate alerts for the same closed position
-          // Only send for positive PnL (losses are skipped)
-          if (wasNotClosed && percentPnl !== undefined && percentPnl >= 0 && !wasHandledByFullyClosedCheck) {
-            // Use updated metadata with exitPrice and realizedOutcome
-            await this.sendGainzAlertForActivity(activity, whale, metadata);
-            // Mark that we sent the alert to prevent duplicates
-            if (!activity.metadata) {
-              activity.metadata = {};
-            }
-            activity.metadata.gainzAlertSent = true;
-          }
+          // Gainz alerts now only dispatch from checkFullyClosedPositions to ensure
+          // consistent payloads (waits for closed position data)
         }
 
         // If activity was updated, save and update Discord
@@ -2204,12 +2215,6 @@ class TradePollingService {
           
           const wasNotClosed = activity.status !== "closed";
           
-          // Check if this activity was already processed by checkFullyClosedPositions BEFORE we update metadata
-          // This prevents duplicate alerts for the same closed position
-          const activityMetadata = activity.metadata || {};
-          // Check both exitPrice and gainzAlertSent flag to prevent duplicates
-          const wasHandledByFullyClosedCheck = activityMetadata.exitPrice !== undefined || activityMetadata.gainzAlertSent === true;
-          
           // Calculate exit price using formula: Average Exit Price = (Total Cost + Realized PnL) / Total Bought
           const totalCost = closedPosition.totalBought * closedPosition.avgPrice;
           const calculatedExitPrice = closedPosition.totalBought > 0 && closedPosition.realizedPnl !== undefined
@@ -2254,20 +2259,8 @@ class TradePollingService {
             updated = true;
           }
           
-          // Note: Gainz alerts are sent from checkFullyClosedPositions to avoid duplicates
-          // Only send gainz alert here if this activity wasn't handled by checkFullyClosedPositions
-          // (i.e., if it was already closed before checkFullyClosedPositions ran)
-          // This prevents duplicate alerts for the same closed position
-          // Only send for positive PnL (losses are skipped)
-          if (wasNotClosed && percentPnl !== undefined && percentPnl >= 0 && !wasHandledByFullyClosedCheck) {
-            // Use updated metadata with exitPrice and realizedOutcome
-            await this.sendGainzAlertForActivity(activity, whale, metadata);
-            // Mark that we sent the alert to prevent duplicates
-            if (!activity.metadata) {
-              activity.metadata = {};
-            }
-            activity.metadata.gainzAlertSent = true;
-          }
+          // Gainz alerts now only dispatch from checkFullyClosedPositions to ensure
+          // consistent payloads (waits for closed position data)
         }
 
         // If activity was updated, save and update Discord
@@ -3280,6 +3273,9 @@ class TradePollingService {
           };
 
           // Reply to Discord message before updating database (to prevent race conditions)
+          const whaleCategoryForCheck = whale.category || "regular";
+          const isWhaleCategory = whaleCategoryForCheck === "whale";
+          
           if (openBuyTrade.discordMessageId) {
             console.log(`   💬 Replying to Discord message for closed position | Original: ${openBuyTrade.discordMessageId}`);
             
@@ -3290,7 +3286,6 @@ class TradePollingService {
               );
             } else {
               // Check if alert should be sent for this status
-              const whaleCategoryForCheck = whale.category || "regular";
               if (!discordService.shouldSendAlertForStatus(whaleCategoryForCheck, 'closed')) {
                 console.log(
                   `   ⏭️  Skipping Discord reply (status "closed" disabled for ${whaleCategoryForCheck} traders) | Whale: ${whale.label || whale.walletAddress}`
@@ -3313,7 +3308,9 @@ class TradePollingService {
               }
             }
           } else {
-            console.warn(`   ⚠️  No Discord message ID found for open BUY trade ${openBuyTrade.id}`);
+            // Fully closed positions MUST have a matching opening initial buy message
+            // Skip if no parent message exists (applies to both regular and whale categories)
+            console.warn(`   ⚠️  No Discord message ID found for open BUY trade ${openBuyTrade.id} (skipping closed position alert - requires parent initial buy message)`);
           }
 
           // Update the open BUY trade status to closed in database (after Discord reply)
